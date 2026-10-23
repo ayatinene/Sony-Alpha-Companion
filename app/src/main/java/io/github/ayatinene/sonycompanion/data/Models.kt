@@ -22,9 +22,7 @@ data class Resource(val url: String, val mime: String = "image/jpeg", val size: 
 data class CameraFile(val id: String, val name: String, val resources: List<Resource> = emptyList(),
     val thumbnail: String? = null, val date: String = "", val container: Boolean = false,
     val size: Long = 0, val raw: Boolean = false, val handle: Long? = null) {
-    fun bestResource(): Resource? = resources.filter { it.mime.contains("jpeg", true) }
-        .maxWithOrNull(compareBy<Resource> { it.resolution.split('x').mapNotNull(String::toLongOrNull).let { d -> if (d.size == 2) d[0] * d[1] else 0 } }
-            .thenBy { it.size }.thenBy { if (it.profile.contains("LRG")) 1 else 0 })
+    fun bestResource(): Resource? = jpegResource()
 }
 data class LocalPhoto(val uri: String, val name: String, val bytes: Long, val added: Long,
     val origin: String, val sourceId: String, val pairKey: String = pairKey(name))

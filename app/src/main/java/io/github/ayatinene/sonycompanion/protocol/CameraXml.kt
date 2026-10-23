@@ -65,8 +65,7 @@ object CameraXml {
                 val name = e.text("title").ifBlank { e.getAttribute("id") }
                 CameraFile(e.getAttribute("id"), name, resources,
                     e.text("albumArtURI").takeIf(String::isNotBlank)
-                        ?: resources.firstOrNull { it.profile.contains("_TN") }?.url
-                        ?: resources.minByOrNull { it.size }?.url,
+                        ?: CameraFile(e.getAttribute("id"), name, resources).jpegThumbnail()?.url,
                     e.text("date"), container, resources.maxOfOrNull { it.size } ?: 0,
                     raw = name.endsWith(".arw", true))
             }

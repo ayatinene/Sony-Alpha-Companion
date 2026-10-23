@@ -26,6 +26,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.ayatinene.sonycompanion.data.*
+import io.github.ayatinene.sonycompanion.BuildConfig
 import kotlinx.coroutines.*
 import java.util.Locale
 
@@ -170,9 +171,14 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
 
 @Composable private fun CameraGallery(state:AppState,c:CompanionController) {
     var selected by remember(state.device,state.folder) { mutableStateOf(setOf<String>()) }
+    var detail by remember(state.device,state.folder) { mutableStateOf<CameraFile?>(null) }
     var filter by rememberSaveable { mutableStateOf("全部") }
     var descending by rememberSaveable { mutableStateOf(true) }
-    var sizeChoice by rememberSaveable { mutableStateOf("最大可用") }
+    var sizeChoice by rememberSaveable { mutableStateOf(JpegSize.MAXIMUM.name) }
+    val offeredSizes=JpegSize.entries.filter { choice -> state.files.any { !it.container && it.jpegResource(choice)!=null } }
+    val selectedSize=offeredSizes.firstOrNull { it.name==sizeChoice } ?: JpegSize.MAXIMUM
+    val selectedFiles=state.files.filter { it.id in selected && !it.container }
+    val unsupported=if(state.mode==CameraMode.JPEG) selectedFiles.count { it.jpegResource(selectedSize)==null } else 0
     if(!state.connected||state.mode==CameraMode.REMOTE) { EmptyState(Icons.Outlined.SdCard,"相机图库","从首页连接 JPEG 传输，或已完成登记的 RAW / 原文件模式。");return }
     val files=state.files.filter { it.container||filter=="全部"||(filter=="ARW"&&it.raw)||(filter=="JPEG"&&!it.raw) }
         .let { list->if(descending) list.sortedWith(compareByDescending<CameraFile>{it.container}.thenByDescending{it.date}.thenByDescending{it.name}) else list.sortedWith(compareByDescending<CameraFile>{it.container}.thenBy{it.date}.thenBy{it.name}) }
@@ -187,12 +193,8 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
             listOf("全部","JPEG","ARW").filter { state.mode==CameraMode.COMPUTER || it!="ARW" }.forEach { name-> FilterChip(selected=filter==name,onClick={filter=name},label={Text(name)}) }
             if(state.mode==CameraMode.JPEG) {
                 var menu by remember { mutableStateOf(false) }
-                Box { TextButton(onClick={menu=true}){Text(sizeChoice)}; DropdownMenu(menu,{menu=false}) {
-                    buildList {
-                        add("最大可用")
-                        if(state.files.any { f->f.resources.any{it.profile.contains("_SM")} })add("小图")
-                        if(state.files.any { f->f.resources.any{it.profile.contains("_TN")} })add("缩略图")
-                    }.forEach { name->DropdownMenuItem(text={Text(name)},onClick={sizeChoice=name;menu=false}) }
+                Box { TextButton(onClick={menu=true},enabled=offeredSizes.isNotEmpty()){Text(selectedSize.title)}; DropdownMenu(menu,{menu=false}) {
+                    offeredSizes.forEach { size->DropdownMenuItem(text={Text(size.title)},onClick={sizeChoice=size.name;menu=false}) }
                 } }
             }
         }
@@ -206,6 +208,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
                     Box(Modifier.fillMaxWidth().aspectRatio(1f),contentAlignment=Alignment.Center) {
                         if(bitmap!=null) Image(bitmap!!.asImageBitmap(),file.name,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)
                         else Icon(if(file.container)Icons.Outlined.Folder else if(file.raw)Icons.Outlined.RawOn else Icons.Outlined.Image,null,Modifier.size(32.dp),tint=MaterialTheme.colorScheme.onSurfaceVariant)
+                        if(!file.container) IconButton(onClick={detail=file},modifier=Modifier.align(Alignment.TopStart)) { Icon(Icons.Outlined.Info,"照片信息",tint=MaterialTheme.colorScheme.onSurface) }
                         if(file.id in selected) Icon(Icons.Outlined.CheckCircle,"已选择",Modifier.align(Alignment.TopEnd).padding(6.dp),tint=MaterialTheme.colorScheme.primary)
                     }
                     Text(file.name,Modifier.padding(horizontal=8.dp,vertical=4.dp),style=MaterialTheme.typography.labelMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
@@ -213,17 +216,30 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
                 }
             }
         }
+        if(unsupported>0) Text("所选的 $unsupported 个文件未提供${selectedSize.title}，请更改尺寸或取消选择。",Modifier.padding(horizontal=16.dp),style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
         if(selected.isNotEmpty()) Button(onClick={
-            val choices=state.files.filter { it.id in selected }.map { f->
+            val choices=selectedFiles.map { f->
                 if(f.handle!=null)f else {
-                    val resource=when(sizeChoice) {"缩略图"->f.resources.firstOrNull{it.profile.contains("_TN")};"小图"->f.resources.firstOrNull{it.profile.contains("_SM")};else->f.bestResource()}
+                    val resource=f.jpegResource(selectedSize)
                     f.copy(resources=listOfNotNull(resource),size=resource?.size?:0)
                 }
             }
             c.enqueue(choices);selected=emptySet()
-        },Modifier.fillMaxWidth().padding(horizontal=16.dp),shape=shape){Text("下载 ${selected.size} 个文件")}
+        },Modifier.fillMaxWidth().padding(horizontal=16.dp),enabled=unsupported==0 && selectedFiles.isNotEmpty(),shape=shape){Text("下载 ${selectedFiles.size} 个文件")}
         QueuePanel(state,c)
     }
+    detail?.let { file -> AlertDialog(onDismissRequest={detail=null},title={Text(file.name)},text={
+        Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            if(file.date.isNotBlank()) Text(file.date)
+            if(file.handle!=null) Text("${if(file.raw) "ARW 原文件" else "JPEG 原文件"} · ${bytes(file.size)}")
+            else {
+                if(file.raw) Text("此 ARW 条目提供的可下载资源为 JPEG 预览。")
+                file.resources.filter { it.isJpeg }.distinctBy { it.url }.forEach { resource ->
+                    Text(listOfNotNull(resource.jpegSize?.title ?: "JPEG",resource.resolution.takeIf { it.isNotBlank() },resource.size.takeIf { it>0 }?.let(::bytes)).joinToString(" · "))
+                }
+            }
+        }
+    },confirmButton={TextButton(onClick={detail=null}){Text("关闭")}}) }
 }
 
 @Composable private fun QueuePanel(state:AppState,c:CompanionController) {
@@ -331,7 +347,7 @@ private fun share(context:android.content.Context,p:LocalPhoto) {
         } }
         item { Text("DEBUG 用于排查连接和传输；TRACE 额外记录协议文本。日志循环保留约 1.5 MiB，重启后仍可导出。",style=MaterialTheme.typography.bodySmall) }
         item { OutlinedButton(onClick={export.launch(DiagnosticFiles.name(state.mode))},shape=shape){Icon(Icons.Outlined.BugReport,null);Spacer(Modifier.width(8.dp));Text("导出日志与诊断")} }
-        item { Text("版本 0.1.2-preview · Android 10 及以上\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n所有相机功能尚待 A7R2 4.01 实机验证。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Text("版本 ${BuildConfig.VERSION_NAME} · Android 10 及以上\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n适配目标：Sony α7R II · 固件 4.01。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
         item { Text(state.logs.takeLast(12).joinToString("\n"),style=MaterialTheme.typography.labelSmall) }
     }
 }
