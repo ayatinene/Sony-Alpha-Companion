@@ -1,0 +1,62 @@
+[
+  {
+    "repo": "Rkm1999/alpha_capture_lab",
+    "branch": "main",
+    "commit": "ab0f9c8cb9fee650d0a5f87c9888f746e754f817",
+    "tree": "ab0f9c8cb9fee650d0a5f87c9888f746e754f817"
+  },
+  {
+    "repo": "Morning-Sea/SonyPhotoTransfer",
+    "branch": "main",
+    "commit": "6d39accd8c0b366be2efb4c72f11234aba015d51",
+    "tree": "6d39accd8c0b366be2efb4c72f11234aba015d51"
+  },
+  {
+    "repo": "benioZhang/SonyCamera-Remote-API-Demo",
+    "branch": "master",
+    "commit": "ebfcd8bef25549f1e5d42ea7d4f957b3e5c76fd6",
+    "tree": "ebfcd8bef25549f1e5d42ea7d4f957b3e5c76fd6"
+  },
+  {
+    "repo": "RealMadScientist/SonyRX10M3Remote",
+    "branch": "main",
+    "commit": "8f0c957dc285579dce473cef827c5e43b44563bb",
+    "tree": "8f0c957dc285579dce473cef827c5e43b44563bb"
+  },
+  {
+    "repo": "otonielpv/SonyLiveMonitor",
+    "branch": "main",
+    "commit": "59e967cdbd22b12965834568c9006c71937b98f9",
+    "tree": "59e967cdbd22b12965834568c9006c71937b98f9"
+  },
+  {
+    "repo": "gphoto/libgphoto2",
+    "branch": "master",
+    "commit": "bceecb0f0365d015b564e4b08122e28eb16088db",
+    "tree": "bceecb0f0365d015b564e4b08122e28eb16088db"
+  },
+  {
+    "repo": "FireFoxG/sony-guid-setter",
+    "branch": "master",
+    "commit": "b281d817321b235112605761e3ff2467b4ae8e00",
+    "tree": "b281d817321b235112605761e3ff2467b4ae8e00"
+  },
+  {
+    "repo": "schorschii/ImagingEdge4Linux",
+    "branch": "main",
+    "commit": "5317d416ed5296fc5a3343442b17276afb9ccc77",
+    "tree": "5317d416ed5296fc5a3343442b17276afb9ccc77"
+  },
+  {
+    "repo": "shezi/airmtp",
+    "branch": "master",
+    "commit": "e69609c6a66f06e5be4e52cbd23a67bd77eb0819",
+    "tree": "e69609c6a66f06e5be4e52cbd23a67bd77eb0819"
+  },
+  {
+    "repo": "falk0069/sony-pm-alt",
+    "branch": "master",
+    "commit": "9d1d17a57c288250e2181edaf0f55560c2bfa0e4",
+    "tree": "9d1d17a57c288250e2181edaf0f55560c2bfa0e4"
+  }
+]
