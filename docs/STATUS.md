@@ -56,9 +56,10 @@
 
 | 检查 | 结果 |
 |---|---|
-| 自动化测试 | GitHub Actions 执行协议解析、JPEG 资源选择、事件预览、取景会话与 USB 登记报文等测试，结果见对应构建 |
-| Debug APK | GitHub Actions 构建和产物见对应提交 |
-| Android lint | 本次结果见 GitHub Actions 验证产物 |
+| 单元测试 | 80 项通过，0 失败 / 错误 / 跳过，包含协议、资源、队列、缓存及来源隔离 |
+| 模拟器界面测试 | 4 项通过，覆盖横竖屏布局、预览手势、文件删除及深色图标可见性 |
+| Debug APK | 固定签名构建和 APK 证书校验通过；产物见 WORK_PROGRESS.md |
+| Android lint | 0 错误、33 警告；详情见 Actions 验证产物 |
 | 首轮手机与相机反馈 | 基础遥控和 JPEG 传输可用；存在导出/断开闪退及部分 JPEG 下载失败 |
 | 本版实机复测 | 待执行；自动测试不能替代设备验收 |
 | RAW / Send to Computer | 尚未实机测试 |
