@@ -36,7 +36,7 @@ jobs:
           api-level: 35
           arch: x86_64
           target: google_apis
-          profile: pixel_6
+          profile: pixel_c
           disable-animations: true
           script: bash .github/scripts/run_ui_tests.sh
       - uses: actions/upload-artifact@v4

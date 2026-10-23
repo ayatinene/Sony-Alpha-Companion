@@ -38,7 +38,7 @@ class InterfaceTest {
 
     @Test fun landscapePlacesExposureLeftAndShutterRight() {
         compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
-            Box(Modifier.size(width=380.dp,height=300.dp)) { RemoteScreen(remote,controller,{}, {}) }
+            Box(Modifier.size(width=740.dp,height=340.dp)) { RemoteScreen(remote,controller,{}, {}) }
         } }
         val parameter=compose.onNodeWithText("ISO").fetchSemanticsNode().boundsInRoot.center
         val viewfinder=compose.onNodeWithTag("remote-viewfinder").fetchSemanticsNode().boundsInRoot.center
