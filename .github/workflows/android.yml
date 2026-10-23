@@ -27,12 +27,26 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Install SDK
         run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+      - name: Restore fixed signing key
+        if: github.event_name != 'pull_request'
+        env:
+          ANDROID_SIGNING_BUNDLE: ${{ secrets.ANDROID_SIGNING_BUNDLE }}
+        run: python3 .github/scripts/prepare_signing.py
       - name: Test, lint and build
         shell: bash
         run: |
           chmod +x gradlew
           set -o pipefail
           ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :app:assembleDebug 2>&1 | tee build.log
+      - name: Verify APK signing certificate
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs app/build/outputs/apk/debug/app-debug.apk > signing-verification.txt
+          expected=$(cat .github/signing-certificate.sha256)
+          actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signing-verification.txt)
+          test "$actual" = "$expected"
+          echo "Fixed APK signing certificate: $actual" >> "$GITHUB_STEP_SUMMARY"
       - name: Summarize validation
         if: always()
         shell: bash
@@ -52,6 +66,7 @@ jobs:
               out.write(f"Lint: {lint['Error']+lint['Fatal']} errors, {lint['Warning']} warnings.\n")
           PY
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: Alpha-Companion-Debug-APK
           path: app/build/outputs/apk/debug/*.apk
@@ -63,5 +78,10 @@ jobs:
           path: |
             build.log
             validation-summary.json
+            signing-verification.txt
             app/build/reports/
             app/build/test-results/
+      - name: Remove signing key
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/companion-signing.p12"

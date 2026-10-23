@@ -10,3 +10,7 @@ local.properties
 *.JPG
 *.pcap*
 captures/
+*.jks
+*.keystore
+*.p12
+*signing-secret*

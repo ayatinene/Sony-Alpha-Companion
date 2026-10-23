@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
+val signingPath = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
 android {
     namespace = "io.github.ayatinene.sonycompanion"
     compileSdk = 36
@@ -10,8 +11,23 @@ android {
         applicationId = "io.github.ayatinene.sonycompanion"
         minSdk = 29
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.1.5-preview"
+        versionCode = 7
+        versionName = "0.1.6-preview"
+    }
+    if (signingPath != null) {
+        signingConfigs {
+            create("companion") {
+                storeFile = file(signingPath)
+                storeType = "PKCS12"
+                storePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").get()
+            }
+        }
+        buildTypes {
+            getByName("debug") { signingConfig = signingConfigs.getByName("companion") }
+            getByName("release") { signingConfig = signingConfigs.getByName("companion") }
+        }
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
