@@ -24,7 +24,8 @@ import io.github.ayatinene.sonycompanion.data.*
     val image by c.frame.collectAsStateWithLifecycle()
     var grid by rememberSaveable { mutableStateOf(false) }
     var advanced by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize().background(Color(0xFF080B0E)).testTag("remote-screen")) {
+    Surface(Modifier.fillMaxSize(),color=Color(0xFF080B0E),contentColor=MaterialTheme.colorScheme.onSurface) {
+    Column(Modifier.fillMaxSize().testTag("remote-screen")) {
         Row(Modifier.fillMaxWidth().heightIn(min=48.dp),verticalAlignment=Alignment.CenterVertically) {
             IconButton(onClick=onBack) { Icon(Icons.Outlined.ArrowBack,"返回工作台") }
             Column(Modifier.weight(1f)) {
@@ -76,6 +77,7 @@ import io.github.ayatinene.sonycompanion.data.*
                 }
             }
         }
+    }
     }
     if(advanced) CaptureTools(state,c,onDismiss={advanced=false},openWifi=openWifi)
 }

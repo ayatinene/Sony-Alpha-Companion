@@ -46,7 +46,7 @@ private data class PreviewLoad(val bitmap: Bitmap? = null, val loading: Boolean 
     LaunchedEffect(pager.currentPage) { zoomed=false;reset++ }
     Dialog(onDismissRequest=onDismiss,properties=DialogProperties(usePlatformDefaultWidth=false,decorFitsSystemWindows=false)) {
         MaterialTheme(colorScheme=darkColorScheme(primary=Color(0xFFF4AE78),surface=Color(0xFF101215))) {
-            Surface(Modifier.fillMaxSize(),color=Color(0xFF080A0D)) {
+            Surface(Modifier.fillMaxSize(),color=Color(0xFF080A0D),contentColor=MaterialTheme.colorScheme.onSurface) {
                 Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
                     val current=images[pager.currentPage.coerceIn(images.indices)]
                     Row(Modifier.fillMaxWidth().padding(end=12.dp),verticalAlignment=Alignment.CenterVertically) {

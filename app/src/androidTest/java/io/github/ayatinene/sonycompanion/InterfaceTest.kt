@@ -45,6 +45,7 @@ class InterfaceTest {
         val shutter=compose.onNodeWithContentDescription("拍照").assertIsEnabled().fetchSemanticsNode().boundsInRoot.center
         assertTrue(parameter.x<viewfinder.x);assertTrue(viewfinder.x<shutter.x)
         compose.onNodeWithContentDescription("开始录像").assertIsEnabled()
+        assertBrightIcon(compose.onNodeWithContentDescription("返回工作台"))
         capture("remote-landscape",compose.onNodeWithTag("remote-screen"))
     }
     @Test fun portraitPlacesExposureAndShutterBelowTheViewfinder() {
@@ -68,6 +69,7 @@ class InterfaceTest {
         compose.onNodeWithContentDescription("下一张").performClick()
         compose.onNodeWithText("2 / 2").assertExists()
         compose.onNodeWithContentDescription("B.JPG").assertExists()
+        assertBrightIcon(compose.onNodeWithContentDescription("关闭预览"))
         capture("photo-viewer",compose.onNode(isDialog()))
         compose.onNodeWithContentDescription("关闭预览").performClick()
         compose.runOnIdle { assertTrue(dismissed) }
@@ -87,6 +89,15 @@ class InterfaceTest {
             assertFalse(controller.photos.exists(photo))
             assertFalse(controller.photos.list().any { it.uri==photo.uri })
         } finally { runCatching { controller.photos.deleteFile(photo) } }
+    }
+    private fun assertBrightIcon(node: SemanticsNodeInteraction) {
+        val bitmap=node.captureToImage().asAndroidBitmap()
+        var bright=0
+        for(y in 0 until bitmap.height) for(x in 0 until bitmap.width) {
+            val pixel=bitmap.getPixel(x,y)
+            if(android.graphics.Color.red(pixel)>160 && android.graphics.Color.green(pixel)>160 && android.graphics.Color.blue(pixel)>160) bright++
+        }
+        assertTrue("Dark camera surfaces must retain visible foreground icons",bright>10)
     }
     private fun capture(name: String, node: SemanticsNodeInteraction) {
         val resolver=context.contentResolver
