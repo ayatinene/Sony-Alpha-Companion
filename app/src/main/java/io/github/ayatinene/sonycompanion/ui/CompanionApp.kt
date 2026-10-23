@@ -115,11 +115,15 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
 @Composable internal fun SettingControl(setting:Setting,onSelect:(String)->Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
-        OutlinedButton(onClick={open=true},enabled=setting.writable&&setting.choices.isNotEmpty(),shape=shape,modifier=Modifier.fillMaxWidth(),contentPadding=PaddingValues(horizontal=10.dp,vertical=8.dp)) {
-            Column(Modifier.weight(1f),horizontalAlignment=Alignment.Start) {
-                Text(setting.label,style=MaterialTheme.typography.labelSmall)
+        OutlinedButton(onClick={open=true},enabled=setting.writable&&setting.choices.isNotEmpty(),shape=shape,modifier=Modifier.fillMaxWidth(),
+            colors=ButtonDefaults.outlinedButtonColors(disabledContentColor=MaterialTheme.colorScheme.onSurface),contentPadding=PaddingValues(horizontal=10.dp,vertical=8.dp)) {
+            Column(Modifier.fillMaxWidth(),horizontalAlignment=Alignment.Start) {
+                Row(verticalAlignment=Alignment.CenterVertically) {
+                    Text(setting.label,Modifier.weight(1f),style=MaterialTheme.typography.labelSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
+                    if(setting.writable&&setting.choices.isNotEmpty()) Icon(Icons.Outlined.ExpandMore,null,Modifier.size(14.dp))
+                }
                 Text(setting.display(setting.current),style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
-            }; Icon(Icons.Outlined.ExpandMore,null,Modifier.size(18.dp))
+            }
         }
         DropdownMenu(expanded=open,onDismissRequest={open=false},modifier=Modifier.heightIn(max=350.dp)) {
             setting.choices.forEach { value->DropdownMenuItem(text={Text(setting.display(value))},onClick={open=false;onSelect(value)}) }

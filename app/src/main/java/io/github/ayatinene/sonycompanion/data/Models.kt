@@ -13,7 +13,7 @@ data class Device(val name: String, val model: String, val description: URI,
     val digitalImaging: URI? = null, val identity: CameraIdentity = CameraIdentity(),
     val udn: String = "", val serial: String = "") {
     val displayName: String get() = identity.model.ifBlank { model.takeUnless { it.isBlank() || it=="SonyImagingDevice" } ?: name }
-    val cameraId: String? get() = stableCameraId(udn, serial, identity.model.ifBlank { model })
+    val cameraId: String? get() = stableCameraId(udn, serial, model)
 }
 data class CameraApplication(val name: String, val version: String)
 data class CameraIdentity(val model: String="", val firmware: String="", val lens: String="",

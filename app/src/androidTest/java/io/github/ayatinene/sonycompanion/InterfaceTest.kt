@@ -1,6 +1,9 @@
 package io.github.ayatinene.sonycompanion
 
 import android.graphics.Bitmap
+import android.content.ContentValues
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -20,16 +23,18 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.ByteArrayOutputStream
-import java.io.File
+import java.net.URI
 
 @RunWith(AndroidJUnit4::class)
 class InterfaceTest {
     @get:Rule val compose=createComposeRule()
     private val context get()=InstrumentationRegistry.getInstrumentation().targetContext
     private val controller get()=(context.applicationContext as CompanionApplication).controller
-    private val remote=AppState(mode=CameraMode.REMOTE,connected=true,remote=RemoteState(
+    private val remote=AppState(mode=CameraMode.REMOTE,connected=true,device=Device("ILCE-7RM2","ILCE-7RM2",URI("http://fixture")),remote=RemoteState(
         apis=setOf("actTakePicture","actHalfPressShutter","cancelHalfPressShutter","startMovieRec"),
-        settings=listOf(Setting("IsoSpeedRate","ISO","100",emptyList(),false)),status="IDLE"))
+        settings=listOf(Setting("IsoSpeedRate","ISO","100",emptyList(),false),
+            Setting("ShutterSpeed","快门","1/125",emptyList(),false),Setting("FNumber","光圈","5.6",emptyList(),false),
+            Setting("ExposureCompensation","曝光补偿","0",emptyList(),false,3)),status="IDLE"))
 
     @Test fun landscapePlacesExposureLeftAndShutterRight() {
         compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
@@ -84,7 +89,14 @@ class InterfaceTest {
         } finally { runCatching { controller.photos.deleteFile(photo) } }
     }
     private fun capture(name: String, node: SemanticsNodeInteraction) {
-        val directory=File(context.getExternalFilesDir(null),"ui-captures").apply { mkdirs() }
-        File(directory,"$name.png").outputStream().use { node.captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG,100,it) }
+        val resolver=context.contentResolver
+        val uri=resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME,"$name.png")
+            put(MediaStore.Images.Media.MIME_TYPE,"image/png")
+            put(MediaStore.Images.Media.RELATIVE_PATH,Environment.DIRECTORY_PICTURES+"/AlphaCompanionUiCaptures")
+            put(MediaStore.Images.Media.IS_PENDING,1)
+        })!!
+        resolver.openOutputStream(uri)!!.use { node.captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG,100,it) }
+        resolver.update(uri,ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING,0) },null,null)
     }
 }

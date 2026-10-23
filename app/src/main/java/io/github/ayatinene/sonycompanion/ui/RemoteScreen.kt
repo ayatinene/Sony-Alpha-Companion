@@ -37,6 +37,8 @@ import io.github.ayatinene.sonycompanion.data.*
         }
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val landscape=maxWidth>maxHeight
+            val parameterWidth=if(state.remote.settings.size in 1..4)
+                ((maxWidth-16.dp-6.dp*(state.remote.settings.size-1))/state.remote.settings.size).coerceAtLeast(72.dp) else 112.dp
             val viewfinder: @Composable (Modifier)->Unit = { modifier ->
                 BoxWithConstraints(modifier.background(Color.Black).testTag("remote-viewfinder"),contentAlignment=Alignment.Center) {
                     val ratio=image?.let { it.width.toFloat()/it.height } ?: 3f/2
@@ -67,7 +69,7 @@ import io.github.ayatinene.sonycompanion.data.*
                 viewfinder(Modifier.weight(1f).fillMaxWidth())
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(8.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
                     if(state.remote.settings.isEmpty()) Text("曝光参数请在机身调节",Modifier.padding(8.dp),style=MaterialTheme.typography.bodySmall)
-                    state.remote.settings.forEach { setting -> Box(Modifier.width(112.dp)) { SettingControl(setting) { c.setSetting(setting.key,it) } } }
+                    state.remote.settings.forEach { setting -> Box(Modifier.width(parameterWidth)) { SettingControl(setting) { c.setSetting(setting.key,it) } } }
                 }
                 Row(Modifier.fillMaxWidth().padding(bottom=12.dp,top=4.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceEvenly) {
                     FocusControl(state,c); ShutterControl(state,c); MovieControl(state,c)

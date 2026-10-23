@@ -2,7 +2,7 @@ name: Android UI
 on:
   push:
     branches: [main]
-    paths: ['app/**', 'gradle/**', '.github/workflows/android-ui.yml']
+    paths: ['app/**', 'gradle/**', '.github/workflows/android-ui.yml', '.github/scripts/run_ui_tests.sh']
   workflow_dispatch:
 permissions:
   contents: read
@@ -38,9 +38,7 @@ jobs:
           target: google_apis
           profile: pixel_6
           disable-animations: true
-          script: |
-            ./gradlew --no-daemon --console=plain :app:connectedDebugAndroidTest
-            adb pull /sdcard/Android/data/io.github.ayatinene.sonycompanion/files/ui-captures ui-captures
+          script: bash .github/scripts/run_ui_tests.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

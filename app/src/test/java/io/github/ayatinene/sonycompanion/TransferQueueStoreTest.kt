@@ -24,6 +24,8 @@ class TransferQueueStoreTest {
         assertNull(stableCameraId("uuid:00000000-0000-0000-0000-000000000000","000000","Sony"))
         assertNull(stableCameraId("","unknown","Sony"))
         assertEquals("serial:ILCE-7RM2:123456",stableCameraId("","123456","ILCE-7RM2"))
+        val serialOnly=device("").copy(serial="123456",model="SonyImagingDevice")
+        assertEquals(serialOnly.cameraId,serialOnly.copy(identity=CameraIdentity(model="ILCE-7RM2")).cameraId)
         assertNotEquals(queueScope(device(""),CameraMode.JPEG),queueScope(device(""),CameraMode.JPEG))
     }
     @Test fun parsesDescriptorUdnAndSerial() {

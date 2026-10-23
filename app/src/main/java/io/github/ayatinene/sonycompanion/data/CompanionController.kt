@@ -350,7 +350,7 @@ class CompanionController(private val context: Context) {
         val snapshot=state.value;val transport=http;val ptp=computer
         return withContext(Dispatchers.IO) { thumbnailGate.withPermit {
         check(snapshot.queueScope==expectedScope && state.value.queueScope==expectedScope) { "相机会话已更换" }
-        check(snapshot.connected) { "相机已断开" }
+        check(snapshot.connected && state.value.connected) { "相机已断开" }
         check(!snapshot.transferring) { "文件正在传输，完成后可读取预览" }
         if(file.handle!=null && file.raw) {
             val data=requireNotNull(ptp).thumbnail(file.handle)
@@ -374,7 +374,7 @@ class CompanionController(private val context: Context) {
     suspend fun thumbnail(file:CameraFile, expectedScope: String?): Bitmap? {
         val snapshot=state.value;val transport=http;val ptp=computer
         return withContext(Dispatchers.IO) { thumbnailGate.withPermit {
-        if(!snapshot.connected || snapshot.queueScope!=expectedScope || state.value.queueScope!=expectedScope) return@withContext null
+        if(!snapshot.connected || !state.value.connected || snapshot.queueScope!=expectedScope || state.value.queueScope!=expectedScope) return@withContext null
         val key="${snapshot.queueScope}:${file.id}:${file.thumbnail}"; thumbs.get(key)?.let { return@withContext it }
         try {
             val bytes = if(file.handle!=null) ptp?.thumbnail(file.handle) else {
