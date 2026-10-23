@@ -48,6 +48,7 @@ class SmartphoneTransfer(private val device: Device, private val http: CameraHtt
             val args = "<ObjectID>${CameraXml.escape(id)}</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag><Filter>*</Filter><StartingIndex>$offset</StartingIndex><RequestedCount>100</RequestedCount><SortCriteria></SortCriteria>"
             val page = CameraXml.browse(soap(content, CDS, "Browse", args))
             out.addAll(page.items.map { file -> file.copy(
+                parent=id,
                 resources=file.resources.map { it.copy(url=device.description.resolve(it.url).toString()) },
                 thumbnail=file.thumbnail?.let { device.description.resolve(it).toString() }
             ) })

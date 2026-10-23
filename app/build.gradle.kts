@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.ayatinene.sonycompanion"
         minSdk = 29
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.1.6-preview"
+        versionCode = 8
+        versionName = "0.1.7-preview"
     }
     if (signingPath != null) {
         signingConfigs {

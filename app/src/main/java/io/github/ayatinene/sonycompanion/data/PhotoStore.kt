@@ -84,6 +84,19 @@ class PhotoStore(private val context: Context) {
         runCatching { resolver.loadThumbnail(Uri.parse(photo.uri),android.util.Size(400,400),null) }.getOrNull()
             ?: runCatching { resolver.openInputStream(Uri.parse(photo.uri))!!.use { ExifInterface(it).thumbnailBitmap } }.getOrNull()
     }
+    suspend fun fullPreview(photo: LocalPhoto): Bitmap? = withContext(Dispatchers.IO) {
+        val display=if(photo.name.endsWith(".arw",true)) list().firstOrNull {
+            it.pairKey==photo.pairKey && (it.name.endsWith(".jpg",true) || it.name.endsWith(".jpeg",true)) && exists(it)
+        } ?: photo else photo
+        if(display.name.endsWith(".arw",true)) {
+            resolver.openInputStream(Uri.parse(display.uri))?.use { ExifInterface(it).thumbnailBitmap }
+                ?: preview(display)
+        } else PreviewBitmap.decode { requireNotNull(resolver.openInputStream(Uri.parse(display.uri))) { "文件已移除" } }
+    }
+    @Synchronized fun deleteFile(photo: LocalPhoto) {
+        resolver.delete(Uri.parse(photo.uri),null,null)
+        removeRecord(photo)
+    }
     @Synchronized fun removeRecord(photo: LocalPhoto) = writeRecords(list().filter { it.uri!=photo.uri })
     @Synchronized fun pruneMissing(): List<LocalPhoto> {
         val records=list()

@@ -14,6 +14,8 @@ import java.net.InetAddress
  * Requires an already registered receiver GUID. No claim of A7R2 hardware validation.
  */
 class ComputerTransfer(private val network: Network) {
+    var serial: String = ""; private set
+    var firmware: String = ""; private set
     private var connection: PtpConnection? = null
     private var transport: PtpIpConnection? = null
     private var session: PtpSession? = null
@@ -27,6 +29,8 @@ class ComputerTransfer(private val network: Network) {
                 PtpIpConnection.PtpIpHostId(bytes,"Alpha Companion"))
             val s = c.openSession(); session = s
             val info = c.deviceInfo
+            serial=info.mSerialNumber.mString
+            firmware=info.mDeviceVersion.mString
             val codes = info.mOperationsSupported.values.map { it.mValue }
             if(0x9280 in codes && 0x9281 in codes) s.sonyStartTransfer()
             info.mModel.mString
@@ -44,7 +48,8 @@ class ComputerTransfer(private val network: Network) {
                     // First release focuses on JPEG/ARW; no thumbnail probing for movies.
                     if(!name.endsWith(".arw",true) && !name.endsWith(".jpg",true) && !name.endsWith(".jpeg",true)) continue
                     add(CameraFile(handle.mValue.toString(),name,size=i.mObjectCompressedSize.mValue,
-                        raw=name.endsWith(".arw",true),handle=handle.mValue,date=i.mCaptureDate.mDate?.toString().orEmpty()))
+                        raw=name.endsWith(".arw",true),handle=handle.mValue,date=i.mCaptureDate.mDate?.toString().orEmpty(),
+                        parent="${storage.mValue}/${i.mParentObject.mValue}"))
                     onFile(size)
                 }
             }
