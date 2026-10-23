@@ -4,6 +4,7 @@
 
 ## 本版遥控与 USB 初始化
 
+- 读取设备实际声明的 DigitalImaging 描述，显示机身固件、镜头及机内应用列表；首页相机型号优先使用真实型号。
 - 补齐 API 1.0 `takePictureUrl` 数组，以及连拍／B 门事件内的 `postviewUrl`；事件返回的 JPEG 可进入下载队列。
 - 取景读取结束后调用已开放的 `stopLiveview`，用于后台暂停、退出与重连的会话释放。
 - 新增实验性 Android USB OTG 接收端登记：Sony Mass Storage 接口发现、系统 USB 授权、8192 字节 GUID 报文与 CSW 状态处理；相机接受命令后才保存供 PTP/IP 使用的 GUID。

@@ -85,6 +85,10 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
                 Text(if(state.connected) "已连接" else "等待连接",fontWeight=FontWeight.Medium)
             }
             Text(state.message,style=MaterialTheme.typography.bodyMedium)
+            state.device?.let { device ->
+                Text(device.displayName+device.identity.firmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.labelLarge)
+                if(device.identity.lens.isNotBlank()) Text(device.identity.lens,style=MaterialTheme.typography.bodySmall)
+            }
             Text("先在相机选择工作模式，再连接对应的 Wi-Fi。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         } } }
         items(CameraMode.entries) { mode ->
@@ -98,7 +102,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
             } }
         }
         item { TextButton(onClick=permissions) { Icon(Icons.Outlined.Security,null); Spacer(Modifier.width(8.dp)); Text("附近设备与通知权限") } }
-        item { Text("首个预览版 · 相机功能仍需 A7R2 实机验证",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Text("Sony α7R II · 遥控拍摄与照片导入",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
         if(state.local.isNotEmpty()) item { Text("最近导入：${state.local.first().name}",style=MaterialTheme.typography.bodyMedium) }
     }
 }
@@ -170,8 +174,8 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
 }
 
 @Composable private fun CameraGallery(state:AppState,c:CompanionController) {
-    var selected by remember(state.device,state.folder) { mutableStateOf(setOf<String>()) }
-    var detail by remember(state.device,state.folder) { mutableStateOf<CameraFile?>(null) }
+    var selected by remember(state.device?.description,state.folder) { mutableStateOf(setOf<String>()) }
+    var detail by remember(state.device?.description,state.folder) { mutableStateOf<CameraFile?>(null) }
     var filter by rememberSaveable { mutableStateOf("全部") }
     var descending by rememberSaveable { mutableStateOf(true) }
     var sizeChoice by rememberSaveable { mutableStateOf(JpegSize.MAXIMUM.name) }
@@ -202,7 +206,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
         if(files.isEmpty()) Box(Modifier.weight(1f)){EmptyState(Icons.Outlined.Image,"没有可显示的文件","可返回根目录，或在相机选择需要发送的照片。")}
         else LazyVerticalGrid(GridCells.Adaptive(120.dp),Modifier.weight(1f),contentPadding=PaddingValues(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             items(files,key={it.id}) { file->
-                val bitmap by produceState<android.graphics.Bitmap?>(null,file.id,state.device,state.transferring) { if(!file.container&&!state.transferring) value=c.thumbnail(file) }
+                val bitmap by produceState<android.graphics.Bitmap?>(null,file.id,state.device?.description,state.transferring) { if(!file.container&&!state.transferring) value=c.thumbnail(file) }
                 Column(Modifier.clip(shape).background(if(file.id in selected)MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer)
                     .clickable(enabled=!state.transferring||!file.container){if(file.container)c.browse(file.id) else selected=if(file.id in selected)selected-file.id else selected+file.id}) {
                     Box(Modifier.fillMaxWidth().aspectRatio(1f),contentAlignment=Alignment.Center) {
@@ -329,7 +333,12 @@ private fun share(context:android.content.Context,p:LocalPhoto) {
         item { Row(verticalAlignment=Alignment.CenterVertically){Text("Material You 动态配色",Modifier.weight(1f));Switch(dynamic,setDynamic)} }
         item { HorizontalDivider() }
         item { Text("连接",style=MaterialTheme.typography.titleMedium) }
-        if(state.remote.application.isNotBlank()) item { Text("机内应用：${state.remote.application}",style=MaterialTheme.typography.bodySmall) }
+        if(state.remote.application.isNotBlank()) item { Text("遥控应用接口信息：${state.remote.application}",style=MaterialTheme.typography.bodySmall) }
+        state.device?.let { device ->
+            item { Text(device.displayName+device.identity.firmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.bodySmall) }
+            if(device.identity.lens.isNotBlank()) item { Text("镜头：${device.identity.lens}"+device.identity.lensFirmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.bodySmall) }
+            if(device.identity.applications.isNotEmpty()) item { Text("已安装机内应用：\n"+device.identity.applications.joinToString("\n") { "${it.name} ${it.version}".trim() },style=MaterialTheme.typography.bodySmall) }
+        }
         item { Text("手动连接 Wi-Fi 后发现相机。保留移动数据；相机请求固定走 Wi-Fi。",style=MaterialTheme.typography.bodySmall) }
         item { OutlinedTextField(description,{description=it;saved=false},Modifier.fillMaxWidth(),label={Text("描述文件 URL / JPEG 模式相机 IP")},placeholder={Text("留空使用 SSDP 自动发现")},singleLine=true) }
         item { Text("RAW / Send to Computer · 实验性",style=MaterialTheme.typography.titleSmall) }

@@ -38,6 +38,7 @@ class CompanionController(private val context: Context) {
     private var liveJob: Job? = null
     private var eventJob: Job? = null
     private var connectionJob: Job? = null
+    private var identityJob: Job? = null
     private var queueJob: Job? = null
     private var intervalJob: Job? = null
     private val thumbnailGate = Semaphore(1)
@@ -136,7 +137,7 @@ class CompanionController(private val context: Context) {
                     if(mode==CameraMode.REMOTE) {
                         val camera=RemoteCamera(requireNotNull(device.remote).toString(),transport) { message -> log(message,if(message.startsWith("RPC"))LogLevel.DEBUG else LogLevel.WARN,"RPC") }; remote=camera
                         val capabilities=camera.initialize()
-                        update { copy(connected=true,remote=capabilities,message="遥控已连接 · ${device.model}") }
+                        update { copy(connected=true,remote=capabilities,message="遥控已连接 · ${device.displayName}") }
                         log("遥控连接成功 application=${capabilities.application} eventVersion=${capabilities.eventVersion} apis=${capabilities.apis.sorted()}",tag="CONNECT")
                         startMonitoring()
                     } else {
@@ -145,6 +146,7 @@ class CompanionController(private val context: Context) {
                         update { copy(connected=true,files=files,folder=transfer.rootId,message="JPEG 服务已连接 · ${transfer.rootId}") }
                         log("JPEG 连接成功 root=${transfer.rootId} entries=${files.size}",tag="CONNECT")
                     }
+                    loadIdentity(device,transport)
                 }
             } catch(e: CancellationException) { throw e }
             catch(e: Exception) {
@@ -152,6 +154,20 @@ class CompanionController(private val context: Context) {
                 withContext(Dispatchers.IO) { computer?.abort(); http?.close() }; computer=null; smartphone=null; remote=null; http=null
                 update { copy(connected=false,error=e.message,message="连接失败") }
             } finally { update { copy(busy=false) } }
+        }
+    }
+    private fun loadIdentity(device: Device, transport: CameraHttp) {
+        val uri=device.digitalImaging ?: return
+        identityJob?.cancel()
+        identityJob=scope.launch {
+            try {
+                val identity=withTimeout(2500) { CameraXml.identity(transport.getText(uri.toString())) }
+                val enriched=device.copy(identity=identity)
+                update { if(connected && http===transport) copy(device=enriched) else this }
+                log("相机信息 model=${identity.model} firmware=${identity.firmware} lens=${identity.lens} applications=${identity.applications}",LogLevel.DEBUG,"DEVICE")
+            } catch(_: TimeoutCancellationException) { log("附加相机信息读取超时",LogLevel.DEBUG,"DEVICE") }
+            catch(e: CancellationException) { throw e }
+            catch(e: Exception) { log("附加相机信息：${e.message}",LogLevel.DEBUG,"DEVICE") }
         }
     }
     fun reconnect() { state.value.mode?.let(::connect) }
@@ -229,6 +245,7 @@ class CompanionController(private val context: Context) {
         val snapshot=state.value
         log("断开开始 finish=$finish connected=${snapshot.connected}",LogLevel.DEBUG,"CONNECT")
         if(snapshot.device!=null) { lastDevice=snapshot.device; lastRemote=snapshot.remote; lastMode=snapshot.mode }
+        identityJob?.cancelAndJoin(); identityJob=null
         stopMonitoring().joinAll(); monitoringStop?.join(); frameState.value=null
         val oldHttp=http; val oldComputer=computer; val oldSmartphone=smartphone
         computer=null; remote=null; smartphone=null; http=null; selectedNetwork=null
@@ -431,7 +448,10 @@ class CompanionController(private val context: Context) {
             put("exportedAt",java.time.OffsetDateTime.now().toString()); put("android",android.os.Build.VERSION.SDK_INT)
             put("device","${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
             put("cameraFirmwareUserProvided","4.01"); put("mode",snapshot.mode?.name); put("connected",snapshot.connected)
-            put("camera",device?.model); put("description",device?.description?.toString())
+            put("camera",device?.displayName); put("description",device?.description?.toString())
+            put("cameraFirmwareReported",device?.identity?.firmware)
+            put("lens",device?.identity?.lens); put("lensFirmware",device?.identity?.lensFirmware)
+            put("installedCameraApplications",JSONArray(device?.identity?.applications.orEmpty().map { app -> JSONObject().put("name",app.name).put("version",app.version) }))
             put("application",remote.application); put("apis",JSONArray(remote.apis.toList()))
             put("eventVersion",remote.eventVersion); put("logs",JSONArray(snapshot.logs))
             put("queue",JSONArray(snapshot.queue.map { q -> JSONObject().apply {

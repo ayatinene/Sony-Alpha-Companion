@@ -9,7 +9,13 @@ enum class CameraMode(val title: String, val instruction: String) {
     COMPUTER("RAW / 原文件 · 实验性", "相机与手机连接同一 Wi-Fi，在相机选择“发送到电脑”。需先通过设置中的 USB OTG 工具或电脑完成接收端登记。")
 }
 data class Device(val name: String, val model: String, val description: URI,
-    val remote: URI? = null, val content: URI? = null, val push: URI? = null)
+    val remote: URI? = null, val content: URI? = null, val push: URI? = null,
+    val digitalImaging: URI? = null, val identity: CameraIdentity = CameraIdentity()) {
+    val displayName: String get() = identity.model.ifBlank { model.takeUnless { it.isBlank() || it=="SonyImagingDevice" } ?: name }
+}
+data class CameraApplication(val name: String, val version: String)
+data class CameraIdentity(val model: String="", val firmware: String="", val lens: String="",
+    val lensFirmware: String="", val applications: List<CameraApplication> = emptyList())
 data class Setting(val key: String, val label: String, val current: String,
     val choices: List<String>, val writable: Boolean, val evStep: Int = 0) {
     fun display(value: String): String = if (key == "ExposureCompensation" && evStep > 0)

@@ -33,6 +33,24 @@ jobs:
           chmod +x gradlew
           set -o pipefail
           ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :app:assembleDebug 2>&1 | tee build.log
+      - name: Summarize validation
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, xml.etree.ElementTree as ET
+          suites=[ET.parse(p).getroot() for p in pathlib.Path('app/build/test-results/testDebugUnitTest').glob('TEST-*.xml')]
+          tests={key:sum(int(s.attrib.get(key,0)) for s in suites) for key in ['tests','failures','errors','skipped']}
+          lint_path=pathlib.Path('app/build/reports/lint-results-debug.xml')
+          issues=ET.parse(lint_path).getroot().findall('issue') if lint_path.exists() else []
+          lint={key:sum(i.attrib.get('severity')==key for i in issues) for key in ['Error','Fatal','Warning']}
+          summary={'tests':tests,'suites':len(suites),'lint':lint}
+          pathlib.Path('validation-summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+          print(json.dumps(summary))
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as out:
+              out.write(f"Tests: {tests['tests']} total, {tests['failures']} failures, {tests['errors']} errors, {tests['skipped']} skipped.\n\n")
+              out.write(f"Lint: {lint['Error']+lint['Fatal']} errors, {lint['Warning']} warnings.\n")
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: Alpha-Companion-Debug-APK
@@ -44,5 +62,6 @@ jobs:
           name: Alpha-Companion-Validation
           path: |
             build.log
+            validation-summary.json
             app/build/reports/
             app/build/test-results/

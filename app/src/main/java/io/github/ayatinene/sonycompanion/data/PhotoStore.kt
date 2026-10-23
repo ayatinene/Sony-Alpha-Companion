@@ -71,6 +71,7 @@ class PhotoStore(private val context: Context) {
         val exif = ExifInterface(stream)
         listOf("文件" to photo.name, "大小" to "${photo.bytes} bytes", "来源" to photo.origin,
             "型号" to exif.getAttribute(ExifInterface.TAG_MODEL),
+            "镜头" to exif.getAttribute(ExifInterface.TAG_LENS_MODEL),
             "尺寸" to "${exif.getAttribute(ExifInterface.TAG_IMAGE_WIDTH) ?: "?"} × ${exif.getAttribute(ExifInterface.TAG_IMAGE_LENGTH) ?: "?"}",
             "拍摄时间" to exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL),
             "ISO" to exif.getAttribute(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY),

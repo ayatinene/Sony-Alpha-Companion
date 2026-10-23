@@ -40,7 +40,19 @@ object CameraXml {
             it.text("serviceType").contains(":$type:")
         }?.text("controlURL")?.takeIf(String::isNotBlank)?.let(urlBase::resolve)
         return Device(root.text("friendlyName").ifBlank { "Sony Camera" }, root.text("modelName"),
-            location, remote, control("ContentDirectory"), control("XPushList"))
+            location, remote, control("ContentDirectory"), control("XPushList"),
+            root.all("service").firstOrNull { it.text("serviceType").contains(":DigitalImaging:") }
+                ?.text("SCPDURL")?.takeIf(String::isNotBlank)?.let(urlBase::resolve))
+    }
+    fun identity(xml: String): CameraIdentity {
+        val root=document(xml)
+        return CameraIdentity(root.text("X_ModelName"),root.text("X_FirmwareVersion"),
+            root.text("X_LensModelName").ifBlank { root.text("X_LensModelNumber") },root.text("X_LensFirmwareVersion"),
+            root.all("X_PlayMemoriesCameraApps_App").mapNotNull { app ->
+                app.text("X_PlayMemoriesCameraApps_AppName").takeIf(String::isNotBlank)?.let {
+                    CameraApplication(it,app.text("X_PlayMemoriesCameraApps_AppVersion"))
+                }
+            })
     }
     fun location(ssdp: String): URI? = ssdp.lineSequence().firstOrNull {
         it.substringBefore(':').trim().equals("LOCATION", true)
