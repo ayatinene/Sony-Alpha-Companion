@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -59,11 +60,14 @@ private data class PreviewLoad(val bitmap: Bitmap? = null, val loading: Boolean 
                     HorizontalPager(state=pager,userScrollEnabled=!zoomed,key={images[it].key},modifier=Modifier.weight(1f)) { page ->
                         val image=images[page]
                         var retry by remember(image.key) { mutableIntStateOf(0) }
+                        var loadedFor by remember { mutableStateOf<String?>(null) }
                         val result by produceState(PreviewLoad(loading=true),image.key,retry,refreshKey) {
+                            if(loadedFor==image.key && value.bitmap!=null) return@produceState
                             value=PreviewLoad(loading=true)
                             value=try { load(image)?.let { PreviewLoad(bitmap=it) } ?: PreviewLoad(error="没有可显示的预览") }
                             catch(e: CancellationException) { throw e }
                             catch(e: Exception) { PreviewLoad(error=e.message ?: "读取预览失败") }
+                            loadedFor=image.key
                         }
                         Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) {
                             result.bitmap?.let { bitmap ->
@@ -102,14 +106,20 @@ private data class PreviewLoad(val bitmap: Bitmap? = null, val loading: Boolean 
         val y=((bitmap.height*fit*zoom-viewport.height)/2).coerceAtLeast(0f)
         return Offset(value.x.coerceIn(-x,x),value.y.coerceIn(-y,y))
     }
-    val transform=rememberTransformableState { zoom, pan, _ ->
-        scale=(scale*zoom).coerceIn(1f,6f)
-        offset=constrain(offset+pan*scale,scale)
+    val transform=rememberTransformableState { centroid, zoom, pan, _ ->
+        val next=(scale*zoom).coerceIn(1f,6f)
+        val ratio=next/scale
+        val center=Offset(viewport.width/2f,viewport.height/2f)
+        val anchor=if(centroid.isSpecified)centroid-center else Offset.Zero
+        offset=constrain(offset*ratio+anchor*(1f-ratio)+pan,next)
+        scale=next
         onZoom(scale>1.01f)
     }
-    Box(Modifier.fillMaxSize().clipToBounds().onSizeChanged { viewport=it }
-        .pointerInput(bitmap,reset) { detectTapGestures(onDoubleTap={
-            scale=if(scale>1.01f)1f else 2.5f;offset=Offset.Zero;onZoom(scale>1.01f)
+    Box(Modifier.fillMaxSize().clipToBounds().onSizeChanged { viewport=it;offset=constrain(offset,scale) }
+        .pointerInput(bitmap,reset) { detectTapGestures(onDoubleTap={ position ->
+            scale=if(scale>1.01f)1f else 2.5f
+            offset=if(scale==1f)Offset.Zero else constrain((position-Offset(viewport.width/2f,viewport.height/2f))*(1f-scale),scale)
+            onZoom(scale>1.01f)
         }) }.transformable(state=transform,canPan={scale>1.01f}),contentAlignment=Alignment.Center) {
         Image(bitmap.asImageBitmap(),description,Modifier.fillMaxSize().graphicsLayer {
             scaleX=scale;scaleY=scale;translationX=offset.x;translationY=offset.y

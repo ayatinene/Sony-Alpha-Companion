@@ -13,6 +13,7 @@ android {
         targetSdk = 36
         versionCode = 8
         versionName = "0.1.7-preview"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     if (signingPath != null) {
         signingConfigs {
@@ -49,6 +50,11 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.exif)
     debugImplementation(libs.compose.tooling)
+    debugImplementation(libs.compose.test.manifest)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.test)
+    androidTestImplementation(libs.test.runner)
+    androidTestImplementation(libs.test.ext)
     testImplementation(libs.junit)
     testImplementation(libs.json.test)
     testImplementation(libs.mockwebserver)

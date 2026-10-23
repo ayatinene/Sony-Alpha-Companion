@@ -89,7 +89,7 @@ class PhotoStore(private val context: Context) {
             it.pairKey==photo.pairKey && (it.name.endsWith(".jpg",true) || it.name.endsWith(".jpeg",true)) && exists(it)
         } ?: photo else photo
         if(display.name.endsWith(".arw",true)) {
-            resolver.openInputStream(Uri.parse(display.uri))?.use { ExifInterface(it).thumbnailBitmap }
+            runCatching { resolver.openInputStream(Uri.parse(display.uri))?.use { ExifInterface(it).thumbnailBitmap } }.getOrNull()
                 ?: preview(display)
         } else PreviewBitmap.decode { requireNotNull(resolver.openInputStream(Uri.parse(display.uri))) { "文件已移除" } }
     }

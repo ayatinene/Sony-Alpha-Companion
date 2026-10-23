@@ -14,6 +14,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -23,7 +24,7 @@ import io.github.ayatinene.sonycompanion.data.*
     val image by c.frame.collectAsStateWithLifecycle()
     var grid by rememberSaveable { mutableStateOf(false) }
     var advanced by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize().background(Color(0xFF080B0E))) {
+    Column(Modifier.fillMaxSize().background(Color(0xFF080B0E)).testTag("remote-screen")) {
         Row(Modifier.fillMaxWidth().heightIn(min=48.dp),verticalAlignment=Alignment.CenterVertically) {
             IconButton(onClick=onBack) { Icon(Icons.Outlined.ArrowBack,"返回工作台") }
             Column(Modifier.weight(1f)) {
@@ -37,7 +38,7 @@ import io.github.ayatinene.sonycompanion.data.*
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val landscape=maxWidth>maxHeight
             val viewfinder: @Composable (Modifier)->Unit = { modifier ->
-                BoxWithConstraints(modifier.background(Color.Black),contentAlignment=Alignment.Center) {
+                BoxWithConstraints(modifier.background(Color.Black).testTag("remote-viewfinder"),contentAlignment=Alignment.Center) {
                     val ratio=image?.let { it.width.toFloat()/it.height } ?: 3f/2
                     val fitted=if(maxWidth/maxHeight>ratio) Modifier.fillMaxHeight().aspectRatio(ratio)
                         else Modifier.fillMaxWidth().aspectRatio(ratio)

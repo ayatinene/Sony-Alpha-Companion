@@ -16,6 +16,7 @@ class TransferQueueStoreTest {
     private fun photo(date: String="2026-10-24")=CameraFile("123","DSC00123.JPG",listOf(Resource("http://old/image",size=100,resolution="6000x4000")),date=date,parent="DCIM/100MSDCF")
     @Test fun distinguishesSameModelAndRetainsIdentityAcrossAddressChanges() {
         assertEquals(device(a).cameraId,device(a,"new-address").cameraId)
+        assertEquals(device(a).cameraId,device(a.uppercase()).cameraId)
         assertNotEquals(device(a).cameraId,device(b).cameraId)
         assertNotEquals(queueScope(device(a),CameraMode.JPEG),queueScope(device(a),CameraMode.COMPUTER))
     }
@@ -55,5 +56,14 @@ class TransferQueueStoreTest {
         val f=photo(); val key=queueScope(device(a),CameraMode.JPEG)
         assertEquals(transferSource(key,f,f.bestResource()),transferSource(key,f,f.bestResource()!!.copy(url="http://changed")))
         assertNotEquals(transferSource(key,f,f.bestResource()),transferSource(key,f,f.bestResource()!!.copy(size=50)))
+    }
+    @Test fun lightweightRawJpegAssociationStaysWithinOneCameraAndDirectory() {
+        val raw=CameraFile("1","DSC00123.ARW",date="2026-10-24",parent="100MSDCF",handle=1,size=100)
+        val jpeg=raw.copy(id="2",name="dsc00123.jpg",handle=2,size=50)
+        val keyA=queueScope(device(a),CameraMode.COMPUTER);val keyB=queueScope(device(b),CameraMode.COMPUTER)
+        val pairA=localPairKey(raw.name,transferSource(keyA,raw,null))
+        assertEquals(pairA,localPairKey(jpeg.name,transferSource(keyA,jpeg,null)))
+        assertNotEquals(pairA,localPairKey(jpeg.name,transferSource(keyB,jpeg,null)))
+        assertNotEquals(pairA,localPairKey(jpeg.name,transferSource(keyA,jpeg.copy(parent="101MSDCF"),null)))
     }
 }

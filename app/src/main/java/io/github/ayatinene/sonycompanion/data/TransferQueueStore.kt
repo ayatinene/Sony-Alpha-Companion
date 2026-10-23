@@ -9,7 +9,7 @@ import java.util.Locale
 import java.util.UUID
 
 fun stableCameraId(udn: String, serial: String, model: String): String? {
-    val uuid=udn.trim().removePrefix("urn:").removePrefix("uuid:").lowercase(Locale.ROOT)
+    val uuid=udn.trim().lowercase(Locale.ROOT).removePrefix("urn:").removePrefix("uuid:")
     if (Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(uuid) &&
         uuid.any { it in '1'..'9' || it in 'a'..'f' }) return "udn:$uuid"
     val value=serial.trim()

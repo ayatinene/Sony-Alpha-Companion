@@ -55,7 +55,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
         Scaffold(contentWindowInsets=WindowInsets.safeDrawing,snackbarHost={SnackbarHost(snackbar)},topBar={
             if(!shooting) TopAppBar(title={ Column {
                 Text("Alpha Companion",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold)
-                Text(state.device?.model?.ifBlank { state.device?.name } ?: "Sony α7R II · 4.01",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(state.device?.displayName ?: "Sony α7R II · 4.01",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
             } },actions={
                 if(state.connected) IconButton(onClick=controller::endSession,enabled=!state.transferring) { Icon(Icons.Outlined.LinkOff,"结束连接") }
                 IconButton(onClick=openWifi) { Icon(Icons.Outlined.Wifi,"Wi-Fi 设置") }
@@ -89,6 +89,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
                 Text(if(state.connected) "已连接" else "等待连接",fontWeight=FontWeight.Medium)
             }
             Text(state.message,style=MaterialTheme.typography.bodyMedium)
+            if(state.queueNotice.isNotBlank()) Text(state.queueNotice,style=MaterialTheme.typography.bodySmall)
             state.device?.let { device ->
                 Text(device.displayName+device.identity.firmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.labelLarge)
                 if(device.identity.lens.isNotBlank()) Text(device.identity.lens,style=MaterialTheme.typography.bodySmall)
@@ -161,7 +162,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
         if(files.isEmpty()) Box(Modifier.weight(1f)){EmptyState(Icons.Outlined.Image,"没有可显示的文件","可返回根目录，或在相机选择需要发送的照片。")}
         else LazyVerticalGrid(GridCells.Adaptive(120.dp),Modifier.weight(1f),contentPadding=PaddingValues(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             items(files,key={it.id}) { file->
-                val bitmap by produceState<android.graphics.Bitmap?>(null,file.id,state.device?.description,state.transferring) { if(!file.container&&!state.transferring) value=c.thumbnail(file) }
+                val bitmap by produceState<android.graphics.Bitmap?>(null,file.id,state.queueScope,state.transferring) { if(!file.container&&!state.transferring) value=c.thumbnail(file,state.queueScope) }
                 Column(Modifier.clip(shape).background(if(file.id in selected)MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer)
                     .combinedClickable(enabled=!state.transferring||!file.container,onClick={
                         if(file.container)c.browse(file.id)
@@ -195,7 +196,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
         val pictures=files.filter { !it.container }
         PhotoViewer(pictures.map { file -> ViewerImage(file.id,file.name,
             if(file.raw && file.handle!=null)"相机缩略预览 · ARW 原文件可单独下载" else "相机 JPEG 预览 · 临时缓存") },key,
-            refreshKey=state.transferring,onDismiss={preview=null},load={ image -> c.cameraPreview(pictures.first { it.id==image.key }) }) { image ->
+            refreshKey=state.transferring,onDismiss={preview=null},load={ image -> c.cameraPreview(pictures.first { it.id==image.key },state.queueScope) }) { image ->
             val file=pictures.first { it.id==image.key }
             TextButton(onClick={detail=file}) { Icon(Icons.Outlined.Info,null);Spacer(Modifier.width(4.dp));Text("信息") }
             TextButton(onClick={
@@ -277,7 +278,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
         item { TextButton(onClick=permissions){Text("申请附近设备与通知权限")} }
         item { HorizontalDivider() }
         item { Text("存储与诊断",style=MaterialTheme.typography.titleMedium) }
-        item { Text("照片：DCIM/AlphaCompanion\n失败和中断的文件不会显示为完成；重试从头下载。\n导入记录用于本地图库；可移除记录，失效记录会自动清理。",style=MaterialTheme.typography.bodySmall) }
+        item { Text("照片：DCIM/AlphaCompanion\n大图预览使用临时缓存，点击下载才保存到系统图库。\n队列按相机和模式保存，重试从头下载。\n本地图库可删除文件或仅清除记录；外部删除的失效记录会自动清理。",style=MaterialTheme.typography.bodySmall) }
         item { Box {
             OutlinedButton(onClick={logMenu=true},shape=shape){Text("记录级别：${logLevel.name}")}
             DropdownMenu(logMenu,{logMenu=false}) { LogLevel.entries.forEach { level ->

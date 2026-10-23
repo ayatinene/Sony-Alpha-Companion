@@ -1,0 +1,51 @@
+name: Android UI
+on:
+  push:
+    branches: [main]
+    paths: ['app/**', 'gradle/**', '.github/workflows/android-ui.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: android-ui-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  interface:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '13114758'
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install SDK and enable KVM
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+          sudo chmod 666 /dev/kvm
+          chmod +x gradlew
+      - name: Run interface tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            ./gradlew --no-daemon --console=plain :app:connectedDebugAndroidTest
+            adb pull /sdcard/Android/data/io.github.ayatinene.sonycompanion/files/ui-captures ui-captures
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Alpha-Companion-UI-Validation
+          path: |
+            ui-captures/
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/

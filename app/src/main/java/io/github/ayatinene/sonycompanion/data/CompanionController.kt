@@ -268,6 +268,7 @@ class CompanionController(private val context: Context) {
     suspend fun disconnect(finish: Boolean = true) {
         val snapshot=state.value
         log("断开开始 finish=$finish connected=${snapshot.connected}",LogLevel.DEBUG,"CONNECT")
+        update { copy(connected=false) }
         if(snapshot.device!=null) { lastDevice=snapshot.device; lastRemote=snapshot.remote; lastMode=snapshot.mode }
         queueJob?.cancelAndJoin(); queueJob=null
         state.value.let { current -> current.queueScope?.let { key -> withContext(Dispatchers.IO) {
@@ -345,16 +346,16 @@ class CompanionController(private val context: Context) {
         finally { update { copy(busy=false) } }
     }
     fun root() { smartphone?.let { browse(it.rootId) } }
-    suspend fun cameraPreview(file: CameraFile): Bitmap? = withContext(Dispatchers.IO) { thumbnailGate.withPermit {
-        val snapshot=state.value
+    suspend fun cameraPreview(file: CameraFile, expectedScope: String?): Bitmap? {
+        val snapshot=state.value;val transport=http;val ptp=computer
+        return withContext(Dispatchers.IO) { thumbnailGate.withPermit {
+        check(snapshot.queueScope==expectedScope && state.value.queueScope==expectedScope) { "相机会话已更换" }
         check(snapshot.connected) { "相机已断开" }
         check(!snapshot.transferring) { "文件正在传输，完成后可读取预览" }
         if(file.handle!=null && file.raw) {
-            val data=requireNotNull(computer).thumbnail(file.handle)
+            val data=requireNotNull(ptp).thumbnail(file.handle)
             return@withContext PreviewBitmap.decode { data.inputStream() }
         }
-        val transport=http
-        val ptp=computer
         val resource=file.jpegResource(JpegSize.LARGE) ?: file.bestResource()
         val key="${snapshot.queueScope}|${file.parent}|${file.id}|${file.date}|${file.size}|${resource?.url}"
         val cached=previews.obtain(key) { output ->
@@ -366,14 +367,19 @@ class CompanionController(private val context: Context) {
             }
         }
         check(state.value.queueScope==snapshot.queueScope && state.value.connected) { "相机会话已更换" }
-        PreviewBitmap.decode { cached.inputStream() } ?: error("无法解码相机预览")
-    } }
-    suspend fun thumbnail(file:CameraFile): Bitmap? = withContext(Dispatchers.IO) { thumbnailGate.withPermit {
-        val key="${state.value.mode}:${file.id}"; thumbs.get(key)?.let { return@withContext it }
+        val decoded=PreviewBitmap.decode { cached.inputStream() }
+        if(decoded==null) { cached.delete();error("无法解码相机预览，请重新读取") }
+        decoded
+    } } }
+    suspend fun thumbnail(file:CameraFile, expectedScope: String?): Bitmap? {
+        val snapshot=state.value;val transport=http;val ptp=computer
+        return withContext(Dispatchers.IO) { thumbnailGate.withPermit {
+        if(!snapshot.connected || snapshot.queueScope!=expectedScope || state.value.queueScope!=expectedScope) return@withContext null
+        val key="${snapshot.queueScope}:${file.id}:${file.thumbnail}"; thumbs.get(key)?.let { return@withContext it }
         try {
-            val bytes = if(file.handle!=null) computer?.thumbnail(file.handle) else {
+            val bytes = if(file.handle!=null) ptp?.thumbnail(file.handle) else {
                 val url=file.thumbnail ?: file.bestResource()?.url ?: return@withContext null
-                http?.stream(url) { r ->
+                transport?.stream(url) { r ->
                     val source=requireNotNull(r.body).source()
                     require(!source.request(4L*1024*1024+1)) { "缩略图过大" }; source.readByteArray()
                 }
@@ -383,7 +389,7 @@ class CompanionController(private val context: Context) {
             options.inSampleSize=(maxOf(options.outWidth,options.outHeight)/500).coerceAtLeast(1); options.inJustDecodeBounds=false
             BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)?.also { thumbs.put(key,it) }
         } catch(e: CancellationException) { throw e } catch(_: Exception) { null }
-    } }
+    } } }
     fun enqueue(files:List<CameraFile>) {
         if(!state.value.connected) return
         val queue=state.value.queue.toMutableList()
@@ -410,13 +416,19 @@ class CompanionController(private val context: Context) {
             update { copy(transferring=true) }
             try {
                 while(isActive) {
-                    check(state.value.connected && state.value.queueScope==sessionScope) { "相机会话已更换，队列暂停" }
+                    if(!state.value.connected || state.value.queueScope!=sessionScope) {
+                        log("相机会话已结束，暂停队列",tag="QUEUE");break
+                    }
                     val item=state.value.queue.firstOrNull { it.state=="等待" }?:break
                     val file=item.file
                     var lastProgress=0L
+                    var lastUiProgress=0L
                     fun progress(read:Long,total:Long) {
-                        update { copy(queue=queue.map { if(it===item || (it.file.id==file.id && it.state=="传输中")) it.copy(state="传输中",received=read,total=total) else it }) }
                         val now=System.nanoTime()
+                        if(read==0L || read==total || now-lastUiProgress>=100_000_000L) {
+                            update { copy(queue=queue.map { if(it===item || (it.file.id==file.id && it.state=="传输中")) it.copy(state="传输中",received=read,total=total) else it }) }
+                            lastUiProgress=now
+                        }
                         if(read>0 && (read==total || now-lastProgress>=2_000_000_000L)) {
                             log("${file.name} bytes=$read/$total",LogLevel.DEBUG,"TRANSFER");lastProgress=now
                         }
