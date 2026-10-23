@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.*
 import android.net.wifi.WifiManager
 import io.github.ayatinene.sonycompanion.data.Device
+import io.github.ayatinene.sonycompanion.data.LogLevel
+import java.util.concurrent.atomic.AtomicLong
 import io.github.ayatinene.sonycompanion.protocol.CameraXml
 import kotlinx.coroutines.*
 import okhttp3.*
@@ -82,7 +84,9 @@ fun preferCompleteDescriptions(devices: List<Device>, remote: Boolean, computer:
     }
 
 /** All camera HTTP uses the selected Wi-Fi; mobile data stays available to other apps. */
-class CameraHttp(network: Network? = null, private val trace: (String,String)->Unit = {_,_->}) : Closeable {
+class CameraHttp(network: Network? = null, private val trace: (String,String)->Unit = {_,_->},
+    private val report: (LogLevel,String,Throwable?)->Unit = {_,_,_->}) : Closeable {
+    companion object { private val requestIds=AtomicLong() }
     private val calls = ConcurrentHashMap.newKeySet<Call>()
     val client = OkHttpClient.Builder().apply {
         if (network != null) { socketFactory(network.socketFactory); dns(object:Dns { override fun lookup(hostname:String) = network.getAllByName(hostname).toList() }) }
@@ -105,14 +109,27 @@ class CameraHttp(network: Network? = null, private val trace: (String,String)->U
     }
     // Cancellation must cancel the Call, not close a Response concurrently with its reader.
     // Keep cancellation armed until the complete body has been consumed, not just the headers.
-    private suspend fun <T> exchange(request: Request, allowSoapFault: Boolean = false, read: suspend (Response)->T): T =
+    private suspend fun <T> exchange(request: Request, allowSoapFault: Boolean = false, operation: String = request.method, read: suspend (Response)->T): T =
         withContext(Dispatchers.IO) { coroutineScope {
             val call=client.newCall(request); calls += call
+            val id=requestIds.incrementAndGet();val start=System.nanoTime()
+            fun elapsed()=(System.nanoTime()-start)/1_000_000
+            report(LogLevel.DEBUG,"HTTP #$id → $operation ${request.url}",null)
             val cancellation=launch(start=CoroutineStart.UNDISPATCHED) {
                 suspendCancellableCoroutine<Unit> { it.invokeOnCancellation { call.cancel() } }
             }
-            try { execute(call,allowSoapFault).use { read(it) } }
-            catch(e: Exception) { currentCoroutineContext().ensureActive(); throw e }
+            try { execute(call,allowSoapFault).use { response ->
+                report(LogLevel.DEBUG,"HTTP #$id ← ${response.code} headers=${elapsed()}ms length=${response.body?.contentLength()} encoding=${response.header("Transfer-Encoding") ?: "fixed"}",null)
+                read(response).also { report(LogLevel.DEBUG,"HTTP #$id complete total=${elapsed()}ms",null) }
+            } }
+            catch(e: Exception) {
+                if(!currentCoroutineContext().isActive) {
+                    report(LogLevel.DEBUG,"HTTP #$id cancelled total=${elapsed()}ms",null)
+                    currentCoroutineContext().ensureActive()
+                }
+                report(LogLevel.WARN,"HTTP #$id failed total=${elapsed()}ms $operation ${request.url}",e)
+                throw e
+            }
             finally { cancellation.cancel(); calls -= call }
         } }
     suspend fun <T> stream(url: String, read: suspend (Response)->T): T = exchange(
@@ -125,7 +142,8 @@ class CameraHttp(network: Network? = null, private val trace: (String,String)->U
     }
     suspend fun post(url: String, body: String, mime: String = "application/json; charset=utf-8", headers: Map<String,String> = emptyMap(), allowSoapFault: Boolean = false): String {
         val request = Request.Builder().url(url).header("Connection","close").post(body.toRequestBody(mime.toMediaType())).apply { headers.forEach { (k,v) -> header(k,v) } }.build()
-        return exchange(request,allowSoapFault) { response ->
+        val operation=headers["SOAPACTION"] ?: runCatching { org.json.JSONObject(body).let { "${it.optString("method")} rpcId=${it.optInt("id")}" } }.getOrDefault("POST")
+        return exchange(request,allowSoapFault,operation) { response ->
             val source = requireNotNull(response.body).source()
             require(!source.request(8L*1024*1024+1)) { "响应过大" }
             source.readUtf8().also { trace("POST $url ${headers["SOAPACTION"] ?: runCatching { org.json.JSONObject(body).optString("method") }.getOrDefault("")}",it) }

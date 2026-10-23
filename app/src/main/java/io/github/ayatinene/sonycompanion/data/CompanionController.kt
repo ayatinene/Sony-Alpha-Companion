@@ -23,6 +23,9 @@ import java.util.*
 class CompanionController(private val context: Context) {
     val prefs = context.getSharedPreferences("settings",Context.MODE_PRIVATE)
     val photos = PhotoStore(context)
+    val journal = DiagnosticLog(java.io.File(context.filesDir,"logs")).apply {
+        minimum=runCatching { LogLevel.valueOf(prefs.getString("logLevel","DEBUG")!!) }.getOrDefault(LogLevel.DEBUG)
+    }
     private val scope = CoroutineScope(SupervisorJob()+Dispatchers.Main.immediate)
     private val mutable = MutableStateFlow(AppState(local=photos.list()))
     val state = mutable.asStateFlow()
@@ -50,9 +53,11 @@ class CompanionController(private val context: Context) {
     private var visible = true
     private val cm = context.getSystemService(ConnectivityManager::class.java)
     init {
+        log("应用启动 version=${BuildConfig.VERSION_NAME} sdk=${android.os.Build.VERSION.SDK_INT} device=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}",tag="APP")
         cm.registerNetworkCallback(NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),object: ConnectivityManager.NetworkCallback() {
             override fun onLost(network: Network) {
                 if(network==selectedNetwork) scope.launch {
+                    log("相机 Wi-Fi 丢失 network=$network",LogLevel.WARN,"CONNECT")
                     cancelTransfers(); disconnect(false)
                     update { copy(error="相机 Wi-Fi 已断开，请重新连接",message="连接已断开") }
                 }
@@ -60,9 +65,14 @@ class CompanionController(private val context: Context) {
         })
     }
     private fun update(block: AppState.()->AppState) { mutable.update { it.block() } }
-    private fun log(message: String) {
-        val line = SimpleDateFormat("HH:mm:ss",Locale.ROOT).format(Date())+" "+message
-        update { copy(logs=(logs+line).takeLast(250)) }
+    private fun log(message: String, level: LogLevel = LogLevel.INFO, tag: String = "APP", error: Throwable? = null) {
+        val line=journal.record(level,tag,message,state.value.mode?.name ?: "OFFLINE",error) ?: return
+        update { copy(logs=(logs+line.lineSequence().first().take(1500)).takeLast(250)) }
+    }
+    fun setLogLevel(level: LogLevel) {
+        journal.minimum=level
+        prefs.edit().putString("logLevel",level.name).apply()
+        log("记录级别改为 $level",LogLevel.DEBUG,"LOGGER")
     }
     fun clearError() { update { copy(error=null) } }
     fun connect(mode: CameraMode) {
@@ -71,15 +81,18 @@ class CompanionController(private val context: Context) {
         connectionJob = scope.launch {
             disconnect()
             update { copy(mode=mode,busy=true,message="查找相机…",error=null,files=emptyList(),remote=RemoteState()) }
+            log("开始连接 mode=$mode",tag="CONNECT")
             try {
                 val networks = CameraNetwork(context)
                 val network = networks.wifi(); selectedNetwork=network
-                val transport = CameraHttp(network) { label,response ->
+                log("绑定 Wi-Fi network=$network",LogLevel.DEBUG,"CONNECT")
+                val transport = CameraHttp(network,trace={ label,response ->
                     synchronized(protocolResponses) {
                         if(protocolResponses.size>=30 && label !in protocolResponses) protocolResponses.remove(protocolResponses.keys.first())
                         protocolResponses[label]=response.take(200_000)
                     }
-                }; http=transport
+                    log("$label\n${response.take(16000)}",LogLevel.TRACE,"PROTOCOL")
+                },report={level,message,error->log(message,level,"HTTP",error)}); http=transport
                 if(mode==CameraMode.COMPUTER) {
                     val guid=prefs.getString("guid","").orEmpty()
                     ComputerTransfer.parseGuid(guid)
@@ -99,22 +112,24 @@ class CompanionController(private val context: Context) {
                         if(devices.isEmpty()) "没有发现匹配服务。请确认相机工作模式、Wi-Fi 和附近设备权限；可在设置填写描述文件 URL。"
                         else "发现多个相机，请在设置填写目标相机的描述文件 URL"
                     }
-                    val device=devices.single(); log("发现 ${device.model} ${device.description}")
+                    val device=devices.single(); log("发现 ${device.model} ${device.description} remote=${device.remote} content=${device.content} push=${device.push}",tag="CONNECT")
                     update { copy(device=device) }
                     if(mode==CameraMode.REMOTE) {
-                        val camera=RemoteCamera(requireNotNull(device.remote).toString(),transport,::log); remote=camera
+                        val camera=RemoteCamera(requireNotNull(device.remote).toString(),transport) { message -> log(message,if(message.startsWith("RPC"))LogLevel.DEBUG else LogLevel.WARN,"RPC") }; remote=camera
                         val capabilities=camera.initialize()
                         update { copy(connected=true,remote=capabilities,message="遥控已连接 · ${device.model}") }
+                        log("遥控连接成功 application=${capabilities.application} eventVersion=${capabilities.eventVersion} apis=${capabilities.apis.sorted()}",tag="CONNECT")
                         startMonitoring()
                     } else {
                         val transfer=SmartphoneTransfer(device,transport); smartphone=transfer
                         val files=transfer.initialize()
                         update { copy(connected=true,files=files,folder=transfer.rootId,message="JPEG 服务已连接 · ${transfer.rootId}") }
+                        log("JPEG 连接成功 root=${transfer.rootId} entries=${files.size}",tag="CONNECT")
                     }
                 }
             } catch(e: CancellationException) { throw e }
             catch(e: Exception) {
-                log("连接失败：${e.message}")
+                log("连接失败：${e.message}",LogLevel.ERROR,"CONNECT",e)
                 withContext(Dispatchers.IO) { computer?.abort(); http?.close() }; computer=null; smartphone=null; remote=null; http=null
                 update { copy(connected=false,error=e.message,message="连接失败") }
             } finally { update { copy(busy=false) } }
@@ -133,7 +148,7 @@ class CompanionController(private val context: Context) {
                     urls.forEach(::importPostview)
                 } catch(e: CancellationException) { throw e }
                 catch(e: Exception) {
-                    failures++; log("状态查询失败：${e.message}")
+                    failures++; log("状态查询失败 attempt=$failures：${e.message}",LogLevel.WARN,"EVENT",e)
                     if(failures>=3) { update { copy(error="状态查询失败，请检查连接并重连") }; break }
                 }
                 delay(900)
@@ -146,14 +161,21 @@ class CompanionController(private val context: Context) {
                     val url=camera.liveView()
                     requireNotNull(http).stream(url) {
                         val reader=LiveViewReader(requireNotNull(it.body).byteStream())
+                        var frames=0L;var bytesRead=0L;var reported=System.nanoTime()
                         while(isActive) {
                             val bytes=reader.next()?:error("实时取景流结束")
                             val image=BitmapFactory.decodeByteArray(bytes,0,bytes.size)?:continue
                             frameState.value=image
+                            frames++;bytesRead+=bytes.size
+                            if(frames==1L) log("实时取景首帧 ${image.width}x${image.height}",tag="LIVEVIEW")
+                            val now=System.nanoTime()
+                            if(now-reported>=5_000_000_000L) {
+                                log("实时取景 frames=$frames jpegBytes=$bytesRead",LogLevel.DEBUG,"LIVEVIEW");reported=now
+                            }
                         }
                     }
                 } catch(e: CancellationException) { throw e }
-                catch(e: Exception) { attempts++; log("实时取景中断 ($attempts/3)：${e.message}"); delay(1000L*attempts) }
+                catch(e: Exception) { attempts++; log("实时取景中断 ($attempts/3)：${e.message}",LogLevel.WARN,"LIVEVIEW",e); delay(1000L*attempts) }
             }
             if(attempts>=3) update { copy(error="实时取景已停止，请重连相机") }
         }
@@ -166,6 +188,7 @@ class CompanionController(private val context: Context) {
     }
     fun setVisible(value: Boolean) {
         visible=value
+        log("可见状态 visible=$value connected=${state.value.connected} transferring=${state.value.transferring}",LogLevel.DEBUG,"LIFECYCLE")
         if(value) {
             scope.launch {
                 monitoringStop?.join()
@@ -179,6 +202,7 @@ class CompanionController(private val context: Context) {
     }
     suspend fun disconnect(finish: Boolean = true) {
         val snapshot=state.value
+        log("断开开始 finish=$finish connected=${snapshot.connected}",LogLevel.DEBUG,"CONNECT")
         if(snapshot.device!=null) { lastDevice=snapshot.device; lastRemote=snapshot.remote; lastMode=snapshot.mode }
         stopMonitoring().joinAll(); monitoringStop?.join(); frameState.value=null
         val oldHttp=http; val oldComputer=computer; val oldSmartphone=smartphone
@@ -186,19 +210,21 @@ class CompanionController(private val context: Context) {
         withContext(NonCancellable+Dispatchers.IO) {
             if(finish) {
                 try { withTimeout(3000) { oldSmartphone?.finish(); oldComputer?.finish() } }
-                catch(e: Exception) { log("结束会话：${e.message}") }
+                catch(e: Exception) { log("结束会话：${e.message}",LogLevel.WARN,"CONNECT",e) }
             }
-            runCatching { oldComputer?.abort() }.onFailure { log("关闭原文件会话：${it.message}") }
+            runCatching { oldComputer?.abort() }.onFailure { log("关闭原文件会话：${it.message}",LogLevel.WARN,"CONNECT",it) }
             oldHttp?.close()
         }
         thumbs.evictAll(); importedUrls.clear()
         update { copy(connected=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") }
+        log("断开完成",LogLevel.DEBUG,"CONNECT")
     }
     fun endSession() { if(!state.value.transferring) action { disconnect() } }
     private fun action(block: suspend ()->Unit) { scope.launch {
-        try { block() } catch(e: CancellationException) { throw e } catch(e: Exception) { log(e.message.orEmpty()); update { copy(error=e.message) } }
+        try { block() } catch(e: CancellationException) { throw e } catch(e: Exception) { log(e.message.orEmpty(),LogLevel.ERROR,"ACTION",e); update { copy(error=e.message) } }
     } }
     fun setSetting(key:String,value:String) = action {
+        log("设置 $key=$value",tag="CONTROL")
         val camera=requireNotNull(remote); camera.set(key,value)
         val refreshed=camera.refresh()
         update { copy(remote=refreshed) }
@@ -211,7 +237,9 @@ class CompanionController(private val context: Context) {
     fun capture() = action { shutter.withLock { captureInternal() } }
     private suspend fun captureInternal() {
         val camera=requireNotNull(remote)
+        log("请求拍照",tag="CAPTURE")
         val urls=camera.takePicture()
+        log("拍照返回 previews=${urls.size}",tag="CAPTURE")
         urls.forEach(::importPostview)
         if(urls.isEmpty()) update { copy(message="快门请求已接受，未返回 JPEG 预览；请检查相机") }
     }
@@ -239,7 +267,11 @@ class CompanionController(private val context: Context) {
     fun stopInterval() { intervalJob?.cancel() }
     fun browse(id: String) = action {
         update { copy(busy=true) }
-        try { val files=requireNotNull(smartphone).browse(id); update { copy(files=files,folder=id) } }
+        try {
+            log("浏览目录 id=$id",LogLevel.DEBUG,"BROWSE")
+            val files=requireNotNull(smartphone).browse(id); update { copy(files=files,folder=id) }
+            log("目录返回 id=$id entries=${files.size}",LogLevel.DEBUG,"BROWSE")
+        }
         finally { update { copy(busy=false) } }
     }
     fun root() { smartphone?.let { browse(it.rootId) } }
@@ -279,7 +311,14 @@ class CompanionController(private val context: Context) {
                 while(isActive) {
                     val item=state.value.queue.firstOrNull { it.state=="等待" }?:break
                     val file=item.file
-                    fun progress(read:Long,total:Long) = update { copy(queue=queue.map { if(it===item || (it.file.id==file.id && it.state=="传输中")) it.copy(state="传输中",received=read,total=total) else it }) }
+                    var lastProgress=0L
+                    fun progress(read:Long,total:Long) {
+                        update { copy(queue=queue.map { if(it===item || (it.file.id==file.id && it.state=="传输中")) it.copy(state="传输中",received=read,total=total) else it }) }
+                        val now=System.nanoTime()
+                        if(read>0 && (read==total || now-lastProgress>=2_000_000_000L)) {
+                            log("${file.name} bytes=$read/$total",LogLevel.DEBUG,"TRANSFER");lastProgress=now
+                        }
+                    }
                     progress(0,file.size)
                     try {
                         val resource = if(file.handle==null) requireNotNull(file.bestResource()) { "相机没有提供 JPEG 资源" } else null
@@ -288,6 +327,7 @@ class CompanionController(private val context: Context) {
                         val source="${state.value.device?.model}|${state.value.mode}|${resource?.url?:file.id}"
                         val expected=resource?.size?:file.size
                         val existing=photos.list().firstOrNull { it.sourceId==source && (expected<=0||it.bytes==expected) && photos.exists(it) }
+                        log("开始 ${file.name} expected=$expected resource=${resource?.url ?: file.id}",tag="TRANSFER")
                         if(existing==null) {
                             // Only repeat safe file GETs. Every failed attempt removes its pending file.
                             val attempts=if(file.handle==null)3 else 1
@@ -305,15 +345,16 @@ class CompanionController(private val context: Context) {
                                     break
                                 } catch(e: IOException) {
                                     if(attempt==attempts) throw e
-                                    log("下载 ${file.name} 中断，重试 $attempt/${attempts-1}：${e.message}")
+                                    log("下载 ${file.name} 中断，重试 $attempt/${attempts-1}：${e.message}",LogLevel.WARN,"TRANSFER",e)
                                     progress(0,expected); delay(400L*attempt)
                                 }
                             }
                         }
                         update { copy(queue=queue.map { if(it.file.id==file.id && it.state=="传输中") it.copy(state=if(existing!=null) "已存在" else "完成") else it },local=photos.list()) }
+                        log("${file.name} ${if(existing!=null) "跳过有效本地文件" else "保存完成"}",tag="TRANSFER")
                     } catch(e: CancellationException) { throw e }
                     catch(e: Exception) {
-                        log("下载 ${file.name} 失败：${e.javaClass.simpleName}: ${e.message}")
+                        log("下载 ${file.name} 失败：${e.javaClass.simpleName}: ${e.message}",LogLevel.ERROR,"TRANSFER",e)
                         update { copy(queue=queue.map { if(it.file.id==file.id && it.state=="传输中") it.copy(state="失败",error=e.message) else it }) }
                     }
                 }
@@ -324,6 +365,7 @@ class CompanionController(private val context: Context) {
         queueJob=job; job.join()
     }
     fun cancelTransfers() {
+        log("请求取消下载",tag="TRANSFER")
         queueJob?.cancel()
         if(state.value.mode==CameraMode.COMPUTER) { val transfer=computer; scope.launch(Dispatchers.IO) { transfer?.abort() } }
     }
@@ -337,11 +379,17 @@ class CompanionController(private val context: Context) {
         update { copy(local=photos.list(),message="已移除导入记录，手机中的文件保留") }
     }
     fun exportDiagnostics(uri: Uri) = action {
+        log("开始导出日志与诊断",tag="EXPORT")
         withContext(Dispatchers.IO) {
-            val bytes=diagnostics().toByteArray(Charsets.UTF_8)
-            requireNotNull(context.contentResolver.openOutputStream(uri,"wt")) { "无法打开诊断文件" }.use { it.write(bytes) }
+            val logs=journal.snapshot()
+            val json=JSONObject(diagnostics()).put("logging",JSONObject().put("level",journal.minimum.name).put("session",journal.session)
+                .put("dropped",logs.dropped).put("writeFailures",logs.writeFailures)).toString(2)
+            requireNotNull(context.contentResolver.openOutputStream(uri,"wt")) { "无法打开诊断文件" }.use {
+                DiagnosticBundle.write(it,json,logs,CrashLog.read(context.filesDir))
+            }
         }
-        update { copy(message="诊断信息已导出") }
+        log("日志与诊断导出完成",tag="EXPORT")
+        update { copy(message="日志与诊断已导出") }
     }
     fun retryFailed() {
         val retry=state.value.queue.filter { it.state in listOf("失败","已取消") }.map { it.file }

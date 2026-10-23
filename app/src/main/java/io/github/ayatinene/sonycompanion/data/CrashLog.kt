@@ -9,7 +9,7 @@ import java.util.Locale
 
 object DiagnosticFiles {
     fun name(mode: CameraMode?, now: Long = System.currentTimeMillis()): String =
-        "AlphaCompanion-${mode?.name?.lowercase(Locale.ROOT) ?: "offline"}-${SimpleDateFormat("yyyyMMdd-HHmmss-SSS",Locale.ROOT).format(Date(now))}.json"
+        "AlphaCompanion-${mode?.name?.lowercase(Locale.ROOT) ?: "offline"}-${SimpleDateFormat("yyyyMMdd-HHmmss-SSS",Locale.ROOT).format(Date(now))}.zip"
 }
 
 /** Local-only last-crash record; included in the next user-requested diagnostic export. */

@@ -298,11 +298,13 @@ private fun share(context:android.content.Context,p:LocalPhoto) {
 
 @Composable private fun SettingsPage(state:AppState,c:CompanionController,theme:String,dynamic:Boolean,setTheme:(String)->Unit,setDynamic:(Boolean)->Unit,permissions:()->Unit) {
     val context=LocalContext.current
-    val export=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")){uri->if(uri!=null)c.exportDiagnostics(uri)}
+    val export=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")){uri->if(uri!=null)c.exportDiagnostics(uri)}
     var description by remember { mutableStateOf(c.prefs.getString("description","").orEmpty()) }
     var host by remember { mutableStateOf(c.prefs.getString("computerHost","").orEmpty()) }
     var guid by remember { mutableStateOf(c.prefs.getString("guid","").orEmpty()) }
     var saved by remember { mutableStateOf(false) }
+    var logLevel by remember { mutableStateOf(c.journal.minimum) }
+    var logMenu by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
         item { Text("外观",style=MaterialTheme.typography.titleMedium) }
         item { Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) { listOf("system" to "跟随系统","light" to "浅色","dark" to "深色").forEach{(value,label)->FilterChip(theme==value,{setTheme(value)},label={Text(label)})} } }
@@ -321,8 +323,15 @@ private fun share(context:android.content.Context,p:LocalPhoto) {
         item { HorizontalDivider() }
         item { Text("存储与诊断",style=MaterialTheme.typography.titleMedium) }
         item { Text("照片：DCIM/AlphaCompanion\n失败和中断的文件不会显示为完成；重试从头下载。\n导入记录用于本地图库；可移除记录，失效记录会自动清理。",style=MaterialTheme.typography.bodySmall) }
-        item { OutlinedButton(onClick={export.launch(DiagnosticFiles.name(state.mode))},shape=shape){Icon(Icons.Outlined.BugReport,null);Spacer(Modifier.width(8.dp));Text("导出诊断信息")} }
-        item { Text("版本 0.1.1-preview · Android 10 及以上\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n所有相机功能尚待 A7R2 4.01 实机验证。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Box {
+            OutlinedButton(onClick={logMenu=true},shape=shape){Text("记录级别：${logLevel.name}")}
+            DropdownMenu(logMenu,{logMenu=false}) { LogLevel.entries.forEach { level ->
+                DropdownMenuItem(text={Text(level.name)},onClick={logLevel=level;c.setLogLevel(level);logMenu=false})
+            } }
+        } }
+        item { Text("DEBUG 用于排查连接和传输；TRACE 额外记录协议文本。日志循环保留约 1.5 MiB，重启后仍可导出。",style=MaterialTheme.typography.bodySmall) }
+        item { OutlinedButton(onClick={export.launch(DiagnosticFiles.name(state.mode))},shape=shape){Icon(Icons.Outlined.BugReport,null);Spacer(Modifier.width(8.dp));Text("导出日志与诊断")} }
+        item { Text("版本 0.1.2-preview · Android 10 及以上\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n所有相机功能尚待 A7R2 4.01 实机验证。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
         item { Text(state.logs.takeLast(12).joinToString("\n"),style=MaterialTheme.typography.labelSmall) }
     }
 }

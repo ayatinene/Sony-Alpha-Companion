@@ -77,7 +77,7 @@ class ConnectionRegressionTest {
     }
     @Test fun diagnosticNamesIncludeModeTimestampAndMilliseconds() {
         val name=DiagnosticFiles.name(CameraMode.JPEG,1700000000123)
-        assertTrue(name.matches(Regex("AlphaCompanion-jpeg-[0-9]{8}-[0-9]{6}-123\\.json")))
+        assertTrue(name.matches(Regex("AlphaCompanion-jpeg-[0-9]{8}-[0-9]{6}-123\\.zip")))
         assertNotEquals(name,DiagnosticFiles.name(CameraMode.JPEG,1700000000124))
     }
     @Test fun crashExportRetainsTheExceptionAndItsCause() {
