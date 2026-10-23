@@ -22,7 +22,7 @@ class PhotoStore(private val context: Context) {
         val records = runCatching { JSONArray(preferences.getString("records","[]")) }.getOrDefault(JSONArray())
         return (0 until records.length()).mapNotNull { i -> runCatching {
             val r=records.getJSONObject(i)
-            LocalPhoto(r.getString("uri"),r.getString("name"),r.getLong("bytes"),r.getLong("added"),r.getString("origin"),r.getString("source"),r.optString("pair",pairKey(r.getString("name"))))
+            LocalPhoto(r.getString("uri"),r.getString("name"),r.getLong("bytes"),r.getLong("added"),r.getString("origin"),r.getString("source"))
         }.getOrNull() }.sortedByDescending { it.added }
     }
     private fun writeRecords(records: List<LocalPhoto>) {

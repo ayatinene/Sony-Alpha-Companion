@@ -3,6 +3,7 @@ package io.github.ayatinene.sonycompanion.ui
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
@@ -41,22 +42,25 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var theme by remember { mutableStateOf(controller.prefs.getString("theme","system")!!) }
     var dynamic by remember { mutableStateOf(controller.prefs.getBoolean("dynamic",false)) }
+    val shooting=tab==1 && state.mode==CameraMode.REMOTE && (state.connected || state.busy)
+    BackHandler(enabled=shooting) { tab=0 }
     val dark=when(theme) { "dark"->true;"light"->false;else->isSystemInDarkTheme() }
-    val colors=if(dynamic && android.os.Build.VERSION.SDK_INT>=31) { if(dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context) }
+    val colors=if(shooting) darkColorScheme(primary=Color(0xFFF4AE78),surface=Color(0xFF14171B),background=Color(0xFF080B0E))
+        else if(dynamic && android.os.Build.VERSION.SDK_INT>=31) { if(dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context) }
         else if(dark) darkColorScheme(primary=Color(0xFFF4AE78),secondary=Color(0xFF9CC9C5),surface=Color(0xFF111820),background=Color(0xFF111820))
         else lightColorScheme(primary=Color(0xFF914C1D),secondary=Color(0xFF356964),surface=Color(0xFFF8F9FC),background=Color(0xFFF8F9FC))
     val snackbar=remember { SnackbarHostState() }
     LaunchedEffect(state.error) { state.error?.let { snackbar.showSnackbar(it,duration=SnackbarDuration.Long); controller.clearError() } }
     MaterialTheme(colorScheme=colors,shapes=Shapes(small=shape,medium=shape,large=RoundedCornerShape(16.dp))) {
-        Scaffold(snackbarHost={SnackbarHost(snackbar)},topBar={
-            TopAppBar(title={ Column {
+        Scaffold(contentWindowInsets=WindowInsets.safeDrawing,snackbarHost={SnackbarHost(snackbar)},topBar={
+            if(!shooting) TopAppBar(title={ Column {
                 Text("Alpha Companion",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold)
                 Text(state.device?.model?.ifBlank { state.device?.name } ?: "Sony α7R II · 4.01",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
             } },actions={
                 if(state.connected) IconButton(onClick=controller::endSession,enabled=!state.transferring) { Icon(Icons.Outlined.LinkOff,"结束连接") }
                 IconButton(onClick=openWifi) { Icon(Icons.Outlined.Wifi,"Wi-Fi 设置") }
             })
-        },bottomBar={NavigationBar {
+        },bottomBar={if(!shooting)NavigationBar {
             destinations.forEachIndexed { index,d -> NavigationBarItem(selected=tab==index,onClick={tab=index},icon={Icon(d.icon,d.title)},label={Text(d.title)},alwaysShowLabel=true) }
         }}) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
@@ -64,11 +68,11 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
                 when(tab) {
                     0->Home(state,controller,{mode->controller.connect(mode); tab=1},requestPermissions)
                     1->when {
-                        state.mode==CameraMode.REMOTE && (state.connected || state.busy)->Remote(state,controller)
+                        state.mode==CameraMode.REMOTE && (state.connected || state.busy)->RemoteScreen(state,controller,onBack={tab=0},openWifi=openWifi)
                         state.connected || state.busy->CameraGallery(state,controller)
                         else->Home(state,controller,{mode->controller.connect(mode)},requestPermissions)
                     }
-                    2->LocalLibrary(state,controller)
+                    2->LocalLibraryScreen(state,controller)
                     else->SettingsPage(state,controller,theme,dynamic,{theme=it;controller.prefs.edit().putString("theme",it).apply()}, {dynamic=it;controller.prefs.edit().putBoolean("dynamic",it).apply()},requestPermissions)
                 }
             }
@@ -107,58 +111,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
     }
 }
 
-@Composable private fun Remote(state:AppState,c:CompanionController) {
-    val image by c.frame.collectAsStateWithLifecycle()
-    var grid by rememberSaveable { mutableStateOf(false) }
-    var interval by remember { mutableStateOf(false) }
-    var count by rememberSaveable { mutableStateOf("10") }
-    var seconds by rememberSaveable { mutableStateOf("5") }
-    val apis=state.remote.apis
-    if(state.mode!=CameraMode.REMOTE||!state.connected) { EmptyState(Icons.Outlined.CameraAlt,"遥控拍摄","在相机启动 Smart Remote Control，然后从首页连接。");return }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom=16.dp)) {
-        Box(Modifier.fillMaxWidth().aspectRatio(3f/2).background(Color(0xFF090D12)),contentAlignment=Alignment.Center) {
-            if(image!=null) Image(image!!.asImageBitmap(),"实时取景",Modifier.fillMaxSize(),contentScale=ContentScale.Fit)
-            else Column(horizontalAlignment=Alignment.CenterHorizontally) { Icon(Icons.Outlined.Videocam, null,tint=Color.LightGray); Text(if("startLiveview" in apis) "等待实时画面…" else "相机未开放实时取景",color=Color.LightGray) }
-            if(grid) Canvas(Modifier.fillMaxSize()) { for(i in 1..2) {
-                drawLine(Color.White.copy(alpha=.4f),androidx.compose.ui.geometry.Offset(size.width*i/3,0f),androidx.compose.ui.geometry.Offset(size.width*i/3,size.height),1f)
-                drawLine(Color.White.copy(alpha=.4f),androidx.compose.ui.geometry.Offset(0f,size.height*i/3),androidx.compose.ui.geometry.Offset(size.width,size.height*i/3),1f)
-            } }
-        }
-        Row(Modifier.fillMaxWidth().padding(horizontal=16.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
-            Text(state.remote.status.ifBlank{"相机已连接"},style=MaterialTheme.typography.labelLarge)
-            Row { IconToggleButton(checked=grid,onCheckedChange={grid=it}){Icon(Icons.Outlined.Grid3x3,"构图网格")}; IconButton(onClick=c::reconnect){Icon(Icons.Outlined.Refresh,"重连")} }
-        }
-        Column(Modifier.padding(horizontal=16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            state.remote.settings.chunked(2).forEach { row -> Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                row.forEach { setting -> Box(Modifier.weight(1f)){ SettingControl(setting){c.setSetting(setting.key,it)} } }
-                if(row.size==1) Spacer(Modifier.weight(1f))
-            } }
-            if(state.remote.settings.isEmpty()) Text("当前相机应用未开放曝光参数。可在机身调节；支持能力已记录到诊断信息。",style=MaterialTheme.typography.bodySmall)
-            Row(Modifier.fillMaxWidth().padding(vertical=14.dp),horizontalArrangement=Arrangement.SpaceEvenly,verticalAlignment=Alignment.CenterVertically) {
-                OutlinedButton(onClick=c::focus,enabled="actHalfPressShutter" in apis&&"cancelHalfPressShutter" in apis,shape=shape) { Text("AF") }
-                FilledIconButton(onClick=c::capture,enabled="actTakePicture" in apis&&state.intervalRemaining==0,modifier=Modifier.size(72.dp),shape=CircleShape) { Icon(Icons.Outlined.CameraAlt,"拍照",Modifier.size(30.dp)) }
-                FilledTonalIconButton(onClick=c::movie,enabled="startMovieRec" in apis||"stopMovieRec" in apis,modifier=Modifier.size(50.dp)) { Icon(if(state.remote.status.contains("MovieRecording",true)) Icons.Outlined.Stop else Icons.Outlined.Videocam,"录像") }
-            }
-            Text("${state.remote.application} · getEvent ${state.remote.eventVersion}",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-            HorizontalDivider()
-            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween,verticalAlignment=Alignment.CenterVertically) {
-                Text("间隔拍摄",style=MaterialTheme.typography.titleSmall)
-                TextButton(onClick={interval=!interval}) { Text(if(interval) "收起" else "展开") }
-            }
-            if(interval) {
-                Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(count,{count=it},Modifier.weight(1f),label={Text("张数")},singleLine=true)
-                    OutlinedTextField(seconds,{seconds=it},Modifier.weight(1f),label={Text("拍完后间隔 / 秒")},singleLine=true)
-                }
-                if(state.intervalRemaining>0) OutlinedButton(onClick=c::stopInterval,shape=shape){Text("停止 · 剩余 ${state.intervalRemaining} 张")}
-                else Button(onClick={c.interval(count.toIntOrNull()?:10,seconds.toIntOrNull()?:5)},enabled="actTakePicture" in apis,shape=shape){Text("开始间隔拍摄")}
-                Text("保持应用在前台。间隔从上张快门响应后计算；不会补发丢失的快门请求。",style=MaterialTheme.typography.bodySmall)
-            }
-        }
-    }
-}
-
-@Composable private fun SettingControl(setting:Setting,onSelect:(String)->Unit) {
+@Composable internal fun SettingControl(setting:Setting,onSelect:(String)->Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
         OutlinedButton(onClick={open=true},enabled=setting.writable&&setting.choices.isNotEmpty(),shape=shape,modifier=Modifier.fillMaxWidth(),contentPadding=PaddingValues(horizontal=10.dp,vertical=8.dp)) {
@@ -174,8 +127,9 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
 }
 
 @Composable private fun CameraGallery(state:AppState,c:CompanionController) {
-    var selected by remember(state.device?.description,state.folder) { mutableStateOf(setOf<String>()) }
-    var detail by remember(state.device?.description,state.folder) { mutableStateOf<CameraFile?>(null) }
+    var selected by remember(state.queueScope,state.folder) { mutableStateOf(setOf<String>()) }
+    var detail by remember(state.queueScope,state.folder) { mutableStateOf<CameraFile?>(null) }
+    var preview by remember(state.queueScope,state.folder) { mutableStateOf<String?>(null) }
     var filter by rememberSaveable { mutableStateOf("全部") }
     var descending by rememberSaveable { mutableStateOf(true) }
     var sizeChoice by rememberSaveable { mutableStateOf(JpegSize.MAXIMUM.name) }
@@ -191,6 +145,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
             if(state.mode==CameraMode.JPEG) IconButton(onClick=c::root,enabled=!state.busy&&!state.transferring){Icon(Icons.Outlined.FolderOpen,"返回根目录")}
             Text(state.folder.ifBlank { "存储卡" },Modifier.weight(1f),style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
             IconButton(onClick={descending=!descending}) { Icon(Icons.Outlined.Sort,"切换排序") }
+            if(selected.isNotEmpty()) TextButton(onClick={selected=emptySet()}) { Text("取消选择") }
             TextButton(onClick={selected=if(selected.size==files.count{!it.container})emptySet() else files.filter{!it.container}.map{it.id}.toSet()}){Text("全选")}
         }
         Row(Modifier.padding(horizontal=16.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
@@ -208,7 +163,11 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
             items(files,key={it.id}) { file->
                 val bitmap by produceState<android.graphics.Bitmap?>(null,file.id,state.device?.description,state.transferring) { if(!file.container&&!state.transferring) value=c.thumbnail(file) }
                 Column(Modifier.clip(shape).background(if(file.id in selected)MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer)
-                    .clickable(enabled=!state.transferring||!file.container){if(file.container)c.browse(file.id) else selected=if(file.id in selected)selected-file.id else selected+file.id}) {
+                    .combinedClickable(enabled=!state.transferring||!file.container,onClick={
+                        if(file.container)c.browse(file.id)
+                        else if(selected.isNotEmpty())selected=if(file.id in selected)selected-file.id else selected+file.id
+                        else preview=file.id
+                    },onLongClick={if(!file.container)selected=selected+file.id})) {
                     Box(Modifier.fillMaxWidth().aspectRatio(1f),contentAlignment=Alignment.Center) {
                         if(bitmap!=null) Image(bitmap!!.asImageBitmap(),file.name,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)
                         else Icon(if(file.container)Icons.Outlined.Folder else if(file.raw)Icons.Outlined.RawOn else Icons.Outlined.Image,null,Modifier.size(32.dp),tint=MaterialTheme.colorScheme.onSurfaceVariant)
@@ -232,6 +191,20 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
         },Modifier.fillMaxWidth().padding(horizontal=16.dp),enabled=unsupported==0 && selectedFiles.isNotEmpty(),shape=shape){Text("下载 ${selectedFiles.size} 个文件")}
         QueuePanel(state,c)
     }
+    preview?.let { key ->
+        val pictures=files.filter { !it.container }
+        PhotoViewer(pictures.map { file -> ViewerImage(file.id,file.name,
+            if(file.raw && file.handle!=null)"相机缩略预览 · ARW 原文件可单独下载" else "相机 JPEG 预览 · 临时缓存") },key,
+            refreshKey=state.transferring,onDismiss={preview=null},load={ image -> c.cameraPreview(pictures.first { it.id==image.key }) }) { image ->
+            val file=pictures.first { it.id==image.key }
+            TextButton(onClick={detail=file}) { Icon(Icons.Outlined.Info,null);Spacer(Modifier.width(4.dp));Text("信息") }
+            TextButton(onClick={
+                val resource=file.jpegResource(selectedSize)
+                c.enqueue(listOf(if(file.handle!=null)file else file.copy(resources=listOfNotNull(resource),size=resource?.size?:0)))
+            },enabled=file.handle!=null || file.jpegResource(selectedSize)!=null) { Icon(Icons.Outlined.FileDownload,null);Spacer(Modifier.width(4.dp));Text("下载") }
+            TextButton(onClick={selected=selected+file.id;preview=null}) { Icon(Icons.Outlined.CheckCircleOutline,null);Spacer(Modifier.width(4.dp));Text("选择") }
+        }
+    }
     detail?.let { file -> AlertDialog(onDismissRequest={detail=null},title={Text(file.name)},text={
         Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             if(file.date.isNotBlank()) Text(file.date)
@@ -251,10 +224,11 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
     var expanded by rememberSaveable { mutableStateOf(false) }
     val active=state.queue.firstOrNull{it.state=="传输中"}
     Surface(tonalElevation=2.dp) { Column(Modifier.fillMaxWidth().padding(12.dp)) {
+        if(state.queueNotice.isNotBlank()) Text(state.queueNotice,style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment=Alignment.CenterVertically) {
             Text(active?.file?.name ?: "队列 · ${state.queue.count { it.state=="完成"||it.state=="已存在" }} / ${state.queue.size}",Modifier.weight(1f),maxLines=1,style=MaterialTheme.typography.labelLarge)
             if(state.transferring)TextButton(onClick=c::cancelTransfers){Text("取消")}
-            else TextButton(onClick=c::retryFailed){Text("重试失败")}
+            else TextButton(onClick={c.retryFailed()},enabled=state.connected&&!state.busy){Text("继续未完成")}
             IconButton(onClick={expanded=!expanded}){Icon(if(expanded)Icons.Outlined.ExpandMore else Icons.Outlined.ExpandLess,"队列详情")}
         }
         if(active!=null) {
@@ -266,54 +240,6 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
             if(!state.transferring)TextButton(onClick=c::clearCompleted){Text("清空队列记录")}
         }
     } }
-}
-
-@Composable private fun LocalLibrary(state:AppState,c:CompanionController) {
-    val context=LocalContext.current
-    var filter by rememberSaveable { mutableStateOf("全部") }
-    var detail by remember { mutableStateOf<LocalPhoto?>(null) }
-    var info by remember { mutableStateOf("") }
-    var forget by remember { mutableStateOf<LocalPhoto?>(null) }
-    val scope=rememberCoroutineScope()
-    LaunchedEffect(Unit) { c.refreshLocal() }
-    val files=state.local.filter { filter=="全部"||(it.name.endsWith(".arw",true))==(filter=="ARW") }
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(horizontal=16.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            listOf("全部","JPEG","ARW").forEach { name->FilterChip(filter==name,{filter=name},label={Text(name)}) }
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick=c::refreshLocal){Icon(Icons.Outlined.Refresh,"刷新并清理失效记录")}
-        }
-        if(files.isEmpty()) EmptyState(Icons.Outlined.PhotoLibrary,"尚未导入照片","下载完成的照片保存在 DCIM/AlphaCompanion，无需授予整库访问权限。")
-        else LazyColumn(contentPadding=PaddingValues(horizontal=16.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-            items(files,key={it.uri}) { file ->
-                val preview by produceState<android.graphics.Bitmap?>(null,file.uri){value=c.photos.preview(file)}
-                ListItem(modifier=Modifier.clip(shape).clickable{detail=file;info="读取 EXIF…";scope.launch { info=withContext(Dispatchers.IO){runCatching {c.photos.metadata(file)}.getOrElse{it.message.orEmpty()}} }},
-                    leadingContent={Box(Modifier.size(64.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceContainer),contentAlignment=Alignment.Center){
-                        if(preview!=null)Image(preview!!.asImageBitmap(),file.name,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)else Icon(Icons.Outlined.Image,null)
-                    }},headlineContent={Text(file.name,maxLines=1)},supportingContent={
-                        val group=state.local.filter{it.pairKey==file.pairKey}
-                        val paired=group.any{it.name.endsWith(".arw",true)}&&group.any{it.name.endsWith(".jpg",true)||it.name.endsWith(".jpeg",true)}
-                        Text(bytes(file.bytes)+(if(paired)" · RAW/JPEG 配对" else ""),style=MaterialTheme.typography.bodySmall)
-                    },trailingContent={Row {
-                        IconButton(onClick={share(context,file)}){Icon(Icons.Outlined.Share,"分享")}
-                        IconButton(onClick={forget=file}){Icon(Icons.Outlined.RemoveCircleOutline,"移除导入记录")}
-                    }})
-            }
-        }
-    }
-    if(forget!=null)AlertDialog(onDismissRequest={forget=null},title={Text("移除导入记录？")},
-        text={Text("仅从本应用图库移除 ${forget!!.name} 的记录，手机中的文件保留。之后可以重新导入。")},
-        confirmButton={TextButton(onClick={c.forgetPhoto(forget!!);forget=null}){Text("移除记录")}},
-        dismissButton={TextButton(onClick={forget=null}){Text("取消")}})
-    if(detail!=null)AlertDialog(onDismissRequest={detail=null},title={Text("照片信息")},text={Text(info,Modifier.verticalScroll(rememberScrollState()))},confirmButton={TextButton(onClick={
-        val photo=detail!!
-        runCatching { context.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse(photo.uri),if(photo.name.endsWith(".arw",true))"image/x-sony-arw" else "image/jpeg").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
-        detail=null
-    }){Text("打开")}},dismissButton={TextButton(onClick={detail=null}){Text("关闭")}})
-}
-private fun share(context:android.content.Context,p:LocalPhoto) {
-    context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType(if(p.name.endsWith(".arw",true))"image/x-sony-arw" else "image/jpeg")
-        .putExtra(Intent.EXTRA_STREAM,Uri.parse(p.uri)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),"分享照片"))
 }
 
 @Composable private fun SettingsPage(state:AppState,c:CompanionController,theme:String,dynamic:Boolean,setTheme:(String)->Unit,setDynamic:(Boolean)->Unit,permissions:()->Unit) {

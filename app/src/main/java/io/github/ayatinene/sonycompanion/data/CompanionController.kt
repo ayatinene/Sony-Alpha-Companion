@@ -482,6 +482,18 @@ class CompanionController(private val context: Context) {
         importedUrls.clear()
         update { copy(local=photos.list(),message="已移除导入记录，手机中的文件保留") }
     }
+    fun deletePhoto(photo: LocalPhoto, permission: (IntentSender)->Unit) = action {
+        try {
+            withContext(Dispatchers.IO) { photos.deleteFile(photo) }
+            importedUrls.clear()
+            update { copy(local=photos.list(),message="已删除 ${photo.name}") }
+        } catch(e: SecurityException) {
+            if(android.os.Build.VERSION.SDK_INT>=30) permission(android.provider.MediaStore.createDeleteRequest(
+                context.contentResolver,listOf(Uri.parse(photo.uri))).intentSender)
+            else if(e is RecoverableSecurityException) permission(e.userAction.actionIntent.intentSender)
+            else throw e
+        }
+    }
     fun exportDiagnostics(uri: Uri) = action {
         log("开始导出日志与诊断",tag="EXPORT")
         withContext(Dispatchers.IO) {

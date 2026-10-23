@@ -33,8 +33,13 @@ data class CameraFile(val id: String, val name: String, val resources: List<Reso
     fun bestResource(): Resource? = jpegResource()
 }
 data class LocalPhoto(val uri: String, val name: String, val bytes: Long, val added: Long,
-    val origin: String, val sourceId: String, val pairKey: String = pairKey(name))
+    val origin: String, val sourceId: String, val pairKey: String = localPairKey(name,sourceId))
 fun pairKey(name: String) = name.substringBeforeLast('.').uppercase(Locale.ROOT)
+fun localPairKey(name: String, source: String): String {
+    val parts=source.split('|')
+    val directory=if(parts.size>=7) parts.take(3).joinToString("|") else source
+    return "$directory|${pairKey(name)}"
+}
 data class QueueItem(val file: CameraFile, val state: String = "等待", val received: Long = 0,
     val total: Long = file.size, val error: String? = null)
 data class AppState(val mode: CameraMode? = null, val connected: Boolean = false,
