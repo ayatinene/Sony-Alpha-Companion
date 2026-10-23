@@ -11,6 +11,7 @@ val Resource.isJpeg: Boolean get() = mime.substringBefore(';').trim().equals("im
 val Resource.jpegSize: JpegSize? get() {
     if (!isJpeg) return null
     return when (dlnaProfile.find(profile)?.groupValues?.get(1)?.uppercase()) {
+        "JPEG_ORG", "JPEG_ORIGINAL" -> JpegSize.ORIGINAL
         "JPEG_TN" -> JpegSize.THUMBNAIL
         "JPEG_SM" -> JpegSize.SMALL
         "JPEG_LRG" -> JpegSize.LARGE

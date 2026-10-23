@@ -1,8 +1,15 @@
 # 版本状态与已知问题
 
-版本：`0.1.4-preview`。目标设备：Sony α7R II（ILCE-7RM2），固件 4.01；Android 10 及以上。
+版本：`0.1.5-preview`。目标设备：Sony α7R II（ILCE-7RM2），固件 4.01；Android 10 及以上。
 
-## 本版图库资源改进
+## 本版遥控与 USB 初始化
+
+- 补齐 API 1.0 `takePictureUrl` 数组，以及连拍／B 门事件内的 `postviewUrl`；事件返回的 JPEG 可进入下载队列。
+- 取景读取结束后调用已开放的 `stopLiveview`，用于后台暂停、退出与重连的会话释放。
+- 新增实验性 Android USB OTG 接收端登记：Sony Mass Storage 接口发现、系统 USB 授权、8192 字节 GUID 报文与 CSW 状态处理；相机接受命令后才保存供 PTP/IP 使用的 GUID。
+- USB 登记入口会说明接收端替换及连接步骤。协议和报文测试由 CI 执行，USB 与 RAW 传输等待实机测试。
+
+## 图库资源改进
 
 - 按 ContentDirectory 实际资源区分原尺寸 JPEG、大图、小图和缩略图；原尺寸缺少分辨率字段时仍可正确选择。
 - 批量下载前提示缺少所选尺寸的照片，避免提交空资源到队列。
@@ -37,7 +44,7 @@
 
 | 检查 | 结果 |
 |---|---|
-| 自动化测试 | 本次提交由 GitHub Actions 执行；新增 9 项 JPEG 兼容测试，并移除错误的备用描述优先断言 |
+| 自动化测试 | GitHub Actions 执行协议解析、JPEG 资源选择、事件预览、取景会话与 USB 登记报文等测试，结果见对应构建 |
 | Debug APK | GitHub Actions 构建和产物见对应提交 |
 | Android lint | 本次结果见 GitHub Actions 验证产物 |
 | 首轮手机与相机反馈 | 基础遥控和 JPEG 传输可用；存在导出/断开闪退及部分 JPEG 下载失败 |
@@ -51,7 +58,7 @@
 ## 当前限制
 
 - 遥控能力取决于机内应用与拍摄模式，未开放的控制不会由手机端补出。
-- RAW 为实验模块，必须使用已登记的接收端 GUID；Android USB OTG 登记尚未实现。
+- RAW 为实验模块，必须使用已登记的接收端 GUID；可通过设置内实验性 USB OTG 工具登记，也可填写电脑已登记的 GUID。
 - 队列尚不支持进程重启后恢复；自动重试和手动重试均从头下载，不支持断点续传。
 - RAW 取消可能关闭 PTP 会话，需要在机身退出并重新进入 Send to Computer。
 - RAW/JPEG 按文件名主干配对，跨日期重复编号可能误配。

@@ -19,6 +19,11 @@ class JpegResourcesTest {
         assertEquals(original,file.jpegResource(JpegSize.ORIGINAL))
         assertEquals(listOf(JpegSize.MAXIMUM,JpegSize.ORIGINAL,JpegSize.LARGE,JpegSize.SMALL,JpegSize.THUMBNAIL),file.availableJpegSizes())
     }
+    @Test fun explicitOriginalProfileIsRecognized() {
+        val explicit=jpeg("explicit.jpg","DLNA.ORG_PN=JPEG_ORG")
+        assertEquals(JpegSize.ORIGINAL,explicit.jpegSize)
+        assertEquals(explicit,file.copy(resources=listOf(large,explicit)).bestResource())
+    }
     @Test fun eachSelectionUsesItsActualDlnaProfile() {
         assertEquals(large,file.jpegResource(JpegSize.LARGE))
         assertEquals(small,file.jpegResource(JpegSize.SMALL))

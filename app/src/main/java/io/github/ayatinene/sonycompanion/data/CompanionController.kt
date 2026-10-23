@@ -50,6 +50,7 @@ class CompanionController(private val context: Context) {
     private val importedUrls = linkedSetOf<String>()
     private val protocolResponses = Collections.synchronizedMap(linkedMapOf<String,String>())
     private var selectedNetwork: Network? = null
+    private var lastUsbDescription = ""
     private var visible = true
     private val cm = context.getSystemService(ConnectivityManager::class.java)
     init {
@@ -75,7 +76,25 @@ class CompanionController(private val context: Context) {
         log("记录级别改为 $level",LogLevel.DEBUG,"LOGGER")
     }
     fun clearError() { update { copy(error=null) } }
+    fun usbStatus(): String = UsbGuidRegistrar(context).description().also {
+        lastUsbDescription=it; log(it,LogLevel.DEBUG,"USB")
+    }
+    fun registerUsbGuid(value: String, onRegistered: (String)->Unit) = action {
+        require(!state.value.connected && !state.value.busy && !state.value.transferring) { "请先断开相机会话并结束传输" }
+        val guid=value.trim().ifBlank { UUID.randomUUID().toString().replace("-","") }
+        ComputerTransfer.parseGuid(guid)
+        update { copy(busy=true,error=null,message="等待 USB 相机授权与登记…") }
+        try {
+            lastUsbDescription=UsbGuidRegistrar(context).description()
+            val model=UsbGuidRegistrar(context) { log(it,tag="USB") }.register(guid)
+            prefs.edit().putString("guid",guid).apply()
+            onRegistered(guid)
+            update { copy(message="已登记 $model。拔下 USB 后，将手机与相机接入同一 Wi-Fi，在相机选择“发送到电脑”。") }
+            log("USB GUID 登记完成，接收端设置已保存",tag="USB")
+        } finally { update { copy(busy=false) } }
+    }
     fun connect(mode: CameraMode) {
+        if(state.value.busy) return
         if(state.value.transferring) { update { copy(error="请先完成或取消文件传输") }; return }
         if(connectionJob?.isActive==true) return
         connectionJob = scope.launch {
@@ -176,6 +195,12 @@ class CompanionController(private val context: Context) {
                     }
                 } catch(e: CancellationException) { throw e }
                 catch(e: Exception) { attempts++; log("实时取景中断 ($attempts/3)：${e.message}",LogLevel.WARN,"LIVEVIEW",e); delay(1000L*attempts) }
+                finally {
+                    withContext(NonCancellable) {
+                        try { withTimeout(2000) { camera.stopLiveView() } }
+                        catch(e: Exception) { log("停止机内实时取景：${e.message}",LogLevel.WARN,"LIVEVIEW",e) }
+                    }
+                }
             }
             if(attempts>=3) update { copy(error="实时取景已停止，请重连相机") }
         }
@@ -415,6 +440,7 @@ class CompanionController(private val context: Context) {
             } }))
             synchronized(protocolResponses) { put("protocolResponses",JSONObject(protocolResponses.toMap())) }
             put("lastCrash",CrashLog.read(context.filesDir))
+            put("usb",lastUsbDescription)
         }.toString(2)
     }
 }

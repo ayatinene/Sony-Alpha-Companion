@@ -8,6 +8,7 @@
 | `protocol/SmartphoneTransfer.kt` / SOAP Browse 字段 | schorschii/ImagingEdge4Linux `imaging-edge.py`，Georg Sieber，GPL-3.0 | Python 传输流程移植 Kotlin；从 descriptor 读取 controlURL；按页返回列表、保留尺寸；零进展检查、结构化 fault、显式结束 |
 | `com/fimagena/libptp/**` | Morning-Sea/SonyPhotoTransfer 携带的 Fimagena libptp，Copyright 2017 Fimagena，LGPL-2.1-or-later；流式修改来自 SonyPhotoTransfer | 保留源码头与许可；更改见下 |
 | `protocol/ComputerTransfer.kt` | 适配 libptp 的使用方式参考 SonyPhotoTransfer `SonyCameraClient.kt`，MIT | 不使用任意 GUID；已登记 GUID 校验；网络 SocketFactory；序列化事务；按文件扩展名限定 JPEG/ARW；流式下载 |
+| `protocol/SonyGuidRegistration.kt` / `network/UsbGuidRegistrar.kt` | sony-pm-alt / FireFoxG/sony-guid-setter（提交 `b281d817321b235112605761e3ff2467b4ae8e00`）及 USB BOT 报文 | 按已公开报文实现 Kotlin 编码与 Android USB Host 传输；保留原始研究者与 LGPL-2.1 说明。USB Host 授权、接口选择与界面在本项目实现 |
 | Sony 特有协议取值 | airmtp/sony-pm-alt/libgphoto2 | 协议互操作参考 |
 
 ## libptp 修改记录

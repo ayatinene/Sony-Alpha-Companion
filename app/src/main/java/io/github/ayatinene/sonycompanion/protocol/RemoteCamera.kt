@@ -15,6 +15,7 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
     private val trace: (String) -> Unit = {}) {
     private val nextId = AtomicInteger(1)
     var state = RemoteState(); private set
+    private var liveViewStarted = false
     suspend fun call(method: String, params: List<Any> = emptyList(), version: String = "1.0"): JSONArray {
         val request = JSONObject().put("method",method).put("params",JSONArray(params))
             .put("id",nextId.getAndIncrement()).put("version",version)
@@ -92,7 +93,8 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
                         if(x.has(field)) values[key.replaceFirstChar(Char::uppercaseChar)] = x.optString(field)
                     }
                     // Camera-body shutter events report a postview URL after capture.
-                    for (key in listOf("postviewImageUrl","imageUrl")) x.optString(key).takeIf { it.startsWith("http://") }?.let(urls::add)
+                    for (key in listOf("postviewImageUrl","postviewUrl","imageUrl")) x.optString(key).takeIf { it.startsWith("http://") }?.let(urls::add)
+                    x.optJSONArray("takePictureUrl")?.strings()?.filter { it.startsWith("http://") }?.let(urls::addAll)
                     x.keys().forEach { visit(x.opt(it)) }
                 }
                 is JSONArray -> (0 until x.length()).forEach { visit(x.opt(it)) }
@@ -132,7 +134,16 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
         call("actHalfPressShutter")
         try { delay(700) } finally { withContext(NonCancellable) { call("cancelHalfPressShutter") } }
     }
-    suspend fun liveView() = call("startLiveview").getString(0)
+    suspend fun liveView(): String {
+        val url=call("startLiveview").getString(0)
+        liveViewStarted=true
+        return url
+    }
+    suspend fun stopLiveView() {
+        if(!liveViewStarted) return
+        liveViewStarted=false
+        if("stopLiveview" in state.apis) call("stopLiveview")
+    }
     suspend fun movie(start: Boolean) {
         val method = if(start) "startMovieRec" else "stopMovieRec"
         require(method in state.apis) { "当前相机模式未开放录像操作" }

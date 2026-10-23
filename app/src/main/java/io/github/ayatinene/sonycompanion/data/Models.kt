@@ -6,7 +6,7 @@ import java.util.Locale
 enum class CameraMode(val title: String, val instruction: String) {
     REMOTE("遥控拍摄", "在相机上启动 Smart Remote Control，再连接相机 Wi-Fi。"),
     JPEG("JPEG 传输", "在相机选择“发送到智能手机”，再连接相机 Wi-Fi。"),
-    COMPUTER("RAW / 原文件 · 实验性", "相机与手机连接同一 Wi-Fi，在相机选择“发送到电脑”。需先完成 USB 接收端登记。")
+    COMPUTER("RAW / 原文件 · 实验性", "相机与手机连接同一 Wi-Fi，在相机选择“发送到电脑”。需先通过设置中的 USB OTG 工具或电脑完成接收端登记。")
 }
 data class Device(val name: String, val model: String, val description: URI,
     val remote: URI? = null, val content: URI? = null, val push: URI? = null)

@@ -321,6 +321,8 @@ private fun share(context:android.content.Context,p:LocalPhoto) {
     var saved by remember { mutableStateOf(false) }
     var logLevel by remember { mutableStateOf(c.journal.minimum) }
     var logMenu by remember { mutableStateOf(false) }
+    var usbInfo by remember { mutableStateOf("") }
+    var registerUsb by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
         item { Text("外观",style=MaterialTheme.typography.titleMedium) }
         item { Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) { listOf("system" to "跟随系统","light" to "浅色","dark" to "深色").forEach{(value,label)->FilterChip(theme==value,{setTheme(value)},label={Text(label)})} } }
@@ -331,10 +333,12 @@ private fun share(context:android.content.Context,p:LocalPhoto) {
         item { Text("手动连接 Wi-Fi 后发现相机。保留移动数据；相机请求固定走 Wi-Fi。",style=MaterialTheme.typography.bodySmall) }
         item { OutlinedTextField(description,{description=it;saved=false},Modifier.fillMaxWidth(),label={Text("描述文件 URL / JPEG 模式相机 IP")},placeholder={Text("留空使用 SSDP 自动发现")},singleLine=true) }
         item { Text("RAW / Send to Computer · 实验性",style=MaterialTheme.typography.titleSmall) }
-        item { Text("需先用电脑通过 USB 登记接收端，填入相同 GUID。当前版本未实现 Android USB OTG 登记；不会用随机 GUID 试连。",style=MaterialTheme.typography.bodySmall) }
+        item { Text("先通过 USB 登记接收端，再用同一 GUID 连接。可使用下方 OTG 登记工具，或填入已经通过电脑登记的 GUID。",style=MaterialTheme.typography.bodySmall) }
         item { OutlinedTextField(host,{host=it;saved=false},Modifier.fillMaxWidth(),label={Text("相机局域网 IP（留空自动发现）")},singleLine=true) }
-        item { OutlinedTextField(guid,{guid=it;saved=false},Modifier.fillMaxWidth(),label={Text("已登记的 16 字节 GUID")},supportingText={Text("32 位十六进制，可含冒号")},singleLine=true) }
+        item { OutlinedTextField(guid,{guid=it;saved=false},Modifier.fillMaxWidth(),label={Text("接收端 16 字节 GUID")},supportingText={Text("32 位十六进制，可含冒号")},singleLine=true) }
         item { Button(onClick={c.prefs.edit().putString("description",description.trim()).putString("computerHost",host.trim()).putString("guid",guid.trim()).apply();saved=true},shape=shape){Text(if(saved) "已保存" else "保存连接设置")} }
+        item { OutlinedButton(onClick={usbInfo=c.usbStatus();registerUsb=true},enabled=!state.connected&&!state.busy&&!state.transferring,shape=shape) { Icon(Icons.Outlined.Usb,null);Spacer(Modifier.width(8.dp));Text("USB OTG 登记接收端 · 实验性") } }
+        item { Text("相机 USB 连接选择“海量存储”，通过数据线和 OTG 连接手机后登记。成功后拔下 USB，再连接 Wi-Fi 使用原文件传输。",style=MaterialTheme.typography.bodySmall) }
         item { TextButton(onClick=permissions){Text("申请附近设备与通知权限")} }
         item { HorizontalDivider() }
         item { Text("存储与诊断",style=MaterialTheme.typography.titleMedium) }
@@ -350,6 +354,9 @@ private fun share(context:android.content.Context,p:LocalPhoto) {
         item { Text("版本 ${BuildConfig.VERSION_NAME} · Android 10 及以上\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n适配目标：Sony α7R II · 固件 4.01。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
         item { Text(state.logs.takeLast(12).joinToString("\n"),style=MaterialTheme.typography.labelSmall) }
     }
+    if(registerUsb) AlertDialog(onDismissRequest={registerUsb=false},title={Text("登记相机的接收端？")},text={
+        Text("$usbInfo\n\n这会替换相机“发送到电脑”的接收端设置。"+(if(guid.isBlank()) "将生成并保存本应用专用 GUID。" else "将登记输入框中的 GUID。")+"如需保留电脑接收端，请先保存其 GUID。")
+    },confirmButton={TextButton(onClick={registerUsb=false;c.registerUsbGuid(guid) { guid=it }}){Text("登记")}},dismissButton={TextButton(onClick={registerUsb=false}){Text("取消")}})
 }
 
 @Composable private fun EmptyState(icon:ImageVector,title:String,text:String) {
