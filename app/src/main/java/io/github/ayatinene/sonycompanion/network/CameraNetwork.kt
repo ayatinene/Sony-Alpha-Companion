@@ -69,11 +69,17 @@ class CameraNetwork(private val context: Context) {
                 }
                 catch (e: CancellationException) { throw e }
                 catch (_: Exception) { null }
-            }.filter { if(computer)true else if (remote) it.remote != null else it.content != null }.distinctBy { if(computer)it.description.host else if(remote) it.remote else it.content }
+            }.filter { if(computer)true else if (remote) it.remote != null else it.content != null }.let { preferCompleteDescriptions(it,remote,computer) }
             devices
         } finally { if(lock.isHeld) lock.release() }
     }
 }
+
+/** The generic dd.xml may omit XPushList while DmsDescPush.xml advertises it. */
+fun preferCompleteDescriptions(devices: List<Device>, remote: Boolean, computer: Boolean = false): List<Device> =
+    devices.sortedByDescending { it.push != null }.distinctBy {
+        if(computer) it.description.host else if(remote) it.remote else it.content
+    }
 
 /** All camera HTTP uses the selected Wi-Fi; mobile data stays available to other apps. */
 class CameraHttp(network: Network? = null, private val trace: (String,String)->Unit = {_,_->}) : Closeable {
@@ -83,16 +89,13 @@ class CameraHttp(network: Network? = null, private val trace: (String,String)->U
         connectTimeout(5,TimeUnit.SECONDS); readTimeout(65,TimeUnit.SECONDS)
         followRedirects(false); retryOnConnectionFailure(false)
     }.build()
-    private suspend fun execute(request: Request, allowSoapFault: Boolean = false): Response = suspendCancellableCoroutine { continuation ->
-        val call = client.newCall(request); calls += call
+    private suspend fun execute(call: Call, allowSoapFault: Boolean): Response = suspendCancellableCoroutine { continuation ->
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object:Callback {
             override fun onFailure(call:Call,e:java.io.IOException) {
-                calls-=call
                 if(continuation.isActive) continuation.resumeWithException(e)
             }
             override fun onResponse(call:Call,response:Response) {
-                calls-=call
                 if(!response.isSuccessful && !(allowSoapFault&&response.code==500)) {
                     val code=response.code;response.close()
                     if(continuation.isActive) continuation.resumeWithException(java.io.IOException("相机 HTTP $code"))
@@ -100,16 +103,29 @@ class CameraHttp(network: Network? = null, private val trace: (String,String)->U
             }
         })
     }
-    suspend fun getText(url: String): String = withContext(Dispatchers.IO) { get(url).use { r ->
+    // Cancellation must cancel the Call, not close a Response concurrently with its reader.
+    // Keep cancellation armed until the complete body has been consumed, not just the headers.
+    private suspend fun <T> exchange(request: Request, allowSoapFault: Boolean = false, read: suspend (Response)->T): T =
+        withContext(Dispatchers.IO) { coroutineScope {
+            val call=client.newCall(request); calls += call
+            val cancellation=launch(start=CoroutineStart.UNDISPATCHED) {
+                suspendCancellableCoroutine<Unit> { it.invokeOnCancellation { call.cancel() } }
+            }
+            try { execute(call,allowSoapFault).use { read(it) } }
+            catch(e: Exception) { currentCoroutineContext().ensureActive(); throw e }
+            finally { cancellation.cancel(); calls -= call }
+        } }
+    suspend fun <T> stream(url: String, read: suspend (Response)->T): T = exchange(
+        Request.Builder().url(url).header("Accept-Encoding","identity").header("Connection","close").get().build(),read=read)
+    suspend fun getText(url: String): String = stream(url) { r ->
         val source = requireNotNull(r.body).source(); val out = okio.Buffer()
         var total = 0L
         while (true) { val n = source.read(out,8192); if(n < 0) break; total += n; require(total <= 8*1024*1024) { "响应过大" } }
         out.readUtf8().also { trace("GET $url",it) }
-    } }
-    suspend fun get(url: String): Response = execute(Request.Builder().url(url).header("Accept-Encoding","identity").get().build())
-    suspend fun post(url: String, body: String, mime: String = "application/json; charset=utf-8", headers: Map<String,String> = emptyMap(), allowSoapFault: Boolean = false): String = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url(url).post(body.toRequestBody(mime.toMediaType())).apply { headers.forEach { (k,v) -> header(k,v) } }.build()
-        execute(request,allowSoapFault).use { response ->
+    }
+    suspend fun post(url: String, body: String, mime: String = "application/json; charset=utf-8", headers: Map<String,String> = emptyMap(), allowSoapFault: Boolean = false): String {
+        val request = Request.Builder().url(url).header("Connection","close").post(body.toRequestBody(mime.toMediaType())).apply { headers.forEach { (k,v) -> header(k,v) } }.build()
+        return exchange(request,allowSoapFault) { response ->
             val source = requireNotNull(response.body).source()
             require(!source.request(8L*1024*1024+1)) { "响应过大" }
             source.readUtf8().also { trace("POST $url ${headers["SOAPACTION"] ?: runCatching { org.json.JSONObject(body).optString("method") }.getOrDefault("")}",it) }

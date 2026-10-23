@@ -31,7 +31,7 @@ import java.util.Locale
 
 private val shape=RoundedCornerShape(10.dp)
 private data class Destination(val title:String,val icon:ImageVector)
-private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destination("遥控",Icons.Outlined.CameraAlt),Destination("相机",Icons.Outlined.SdCard),Destination("本地",Icons.Outlined.PhotoLibrary),Destination("设置",Icons.Outlined.Settings))
+private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destination("相机",Icons.Outlined.CameraAlt),Destination("本地",Icons.Outlined.PhotoLibrary),Destination("设置",Icons.Outlined.Settings))
 
 @Composable fun CompanionApp(model:CompanionViewModel,openWifi:()->Unit,requestPermissions:()->Unit) {
     val controller=model.controller
@@ -61,10 +61,13 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
             Column(Modifier.fillMaxSize().padding(padding)) {
                 if(state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 when(tab) {
-                    0->Home(state,controller,{mode->controller.connect(mode); tab=if(mode==CameraMode.REMOTE)1 else 2},requestPermissions)
-                    1->Remote(state,controller)
-                    2->CameraGallery(state,controller)
-                    3->LocalLibrary(state,controller)
+                    0->Home(state,controller,{mode->controller.connect(mode); tab=1},requestPermissions)
+                    1->when {
+                        state.mode==CameraMode.REMOTE && (state.connected || state.busy)->Remote(state,controller)
+                        state.connected || state.busy->CameraGallery(state,controller)
+                        else->Home(state,controller,{mode->controller.connect(mode)},requestPermissions)
+                    }
+                    2->LocalLibrary(state,controller)
                     else->SettingsPage(state,controller,theme,dynamic,{theme=it;controller.prefs.edit().putString("theme",it).apply()}, {dynamic=it;controller.prefs.edit().putBoolean("dynamic",it).apply()},requestPermissions)
                 }
             }
@@ -250,10 +253,16 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
     var filter by rememberSaveable { mutableStateOf("全部") }
     var detail by remember { mutableStateOf<LocalPhoto?>(null) }
     var info by remember { mutableStateOf("") }
+    var forget by remember { mutableStateOf<LocalPhoto?>(null) }
     val scope=rememberCoroutineScope()
+    LaunchedEffect(Unit) { c.refreshLocal() }
     val files=state.local.filter { filter=="全部"||(it.name.endsWith(".arw",true))==(filter=="ARW") }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(horizontal=16.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) { listOf("全部","JPEG","ARW").forEach { name->FilterChip(filter==name,{filter=name},label={Text(name)}) } }
+        Row(Modifier.padding(horizontal=16.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            listOf("全部","JPEG","ARW").forEach { name->FilterChip(filter==name,{filter=name},label={Text(name)}) }
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick=c::refreshLocal){Icon(Icons.Outlined.Refresh,"刷新并清理失效记录")}
+        }
         if(files.isEmpty()) EmptyState(Icons.Outlined.PhotoLibrary,"尚未导入照片","下载完成的照片保存在 DCIM/AlphaCompanion，无需授予整库访问权限。")
         else LazyColumn(contentPadding=PaddingValues(horizontal=16.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
             items(files,key={it.uri}) { file ->
@@ -265,10 +274,17 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
                         val group=state.local.filter{it.pairKey==file.pairKey}
                         val paired=group.any{it.name.endsWith(".arw",true)}&&group.any{it.name.endsWith(".jpg",true)||it.name.endsWith(".jpeg",true)}
                         Text(bytes(file.bytes)+(if(paired)" · RAW/JPEG 配对" else ""),style=MaterialTheme.typography.bodySmall)
-                    },trailingContent={IconButton(onClick={share(context,file)}){Icon(Icons.Outlined.Share,"分享")}})
+                    },trailingContent={Row {
+                        IconButton(onClick={share(context,file)}){Icon(Icons.Outlined.Share,"分享")}
+                        IconButton(onClick={forget=file}){Icon(Icons.Outlined.RemoveCircleOutline,"移除导入记录")}
+                    }})
             }
         }
     }
+    if(forget!=null)AlertDialog(onDismissRequest={forget=null},title={Text("移除导入记录？")},
+        text={Text("仅从本应用图库移除 ${forget!!.name} 的记录，手机中的文件保留。之后可以重新导入。")},
+        confirmButton={TextButton(onClick={c.forgetPhoto(forget!!);forget=null}){Text("移除记录")}},
+        dismissButton={TextButton(onClick={forget=null}){Text("取消")}})
     if(detail!=null)AlertDialog(onDismissRequest={detail=null},title={Text("照片信息")},text={Text(info,Modifier.verticalScroll(rememberScrollState()))},confirmButton={TextButton(onClick={
         val photo=detail!!
         runCatching { context.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse(photo.uri),if(photo.name.endsWith(".arw",true))"image/x-sony-arw" else "image/jpeg").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)) }
@@ -282,7 +298,7 @@ private fun share(context:android.content.Context,p:LocalPhoto) {
 
 @Composable private fun SettingsPage(state:AppState,c:CompanionController,theme:String,dynamic:Boolean,setTheme:(String)->Unit,setDynamic:(Boolean)->Unit,permissions:()->Unit) {
     val context=LocalContext.current
-    val export=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")){uri->if(uri!=null)context.contentResolver.openOutputStream(uri)?.use{it.write(c.diagnostics().toByteArray())}}
+    val export=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")){uri->if(uri!=null)c.exportDiagnostics(uri)}
     var description by remember { mutableStateOf(c.prefs.getString("description","").orEmpty()) }
     var host by remember { mutableStateOf(c.prefs.getString("computerHost","").orEmpty()) }
     var guid by remember { mutableStateOf(c.prefs.getString("guid","").orEmpty()) }
@@ -293,6 +309,7 @@ private fun share(context:android.content.Context,p:LocalPhoto) {
         item { Row(verticalAlignment=Alignment.CenterVertically){Text("Material You 动态配色",Modifier.weight(1f));Switch(dynamic,setDynamic)} }
         item { HorizontalDivider() }
         item { Text("连接",style=MaterialTheme.typography.titleMedium) }
+        if(state.remote.application.isNotBlank()) item { Text("机内应用：${state.remote.application}",style=MaterialTheme.typography.bodySmall) }
         item { Text("手动连接 Wi-Fi 后发现相机。保留移动数据；相机请求固定走 Wi-Fi。",style=MaterialTheme.typography.bodySmall) }
         item { OutlinedTextField(description,{description=it;saved=false},Modifier.fillMaxWidth(),label={Text("描述文件 URL / JPEG 模式相机 IP")},placeholder={Text("留空使用 SSDP 自动发现")},singleLine=true) }
         item { Text("RAW / Send to Computer · 实验性",style=MaterialTheme.typography.titleSmall) }
@@ -303,9 +320,9 @@ private fun share(context:android.content.Context,p:LocalPhoto) {
         item { TextButton(onClick=permissions){Text("申请附近设备与通知权限")} }
         item { HorizontalDivider() }
         item { Text("存储与诊断",style=MaterialTheme.typography.titleMedium) }
-        item { Text("照片：DCIM/AlphaCompanion\n失败和中断的文件不会显示为完成；重试从头下载。\n下载记录保留在应用中，卸载后不保留记录。",style=MaterialTheme.typography.bodySmall) }
-        item { OutlinedButton(onClick={export.launch("AlphaCompanion-diagnostics.json")},shape=shape){Icon(Icons.Outlined.BugReport,null);Spacer(Modifier.width(8.dp));Text("导出诊断信息")} }
-        item { Text("版本 0.1.0-preview · Android 10–16\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n所有相机功能尚待 A7R2 4.01 实机验证。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Text("照片：DCIM/AlphaCompanion\n失败和中断的文件不会显示为完成；重试从头下载。\n导入记录用于本地图库；可移除记录，失效记录会自动清理。",style=MaterialTheme.typography.bodySmall) }
+        item { OutlinedButton(onClick={export.launch(DiagnosticFiles.name(state.mode))},shape=shape){Icon(Icons.Outlined.BugReport,null);Spacer(Modifier.width(8.dp));Text("导出诊断信息")} }
+        item { Text("版本 0.1.1-preview · Android 10 及以上\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n所有相机功能尚待 A7R2 4.01 实机验证。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
         item { Text(state.logs.takeLast(12).joinToString("\n"),style=MaterialTheme.typography.labelSmall) }
     }
 }

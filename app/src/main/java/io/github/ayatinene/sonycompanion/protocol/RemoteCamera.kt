@@ -87,7 +87,9 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
                         "availableApiList" -> x.optJSONArray("names")?.let { apis = it.strings().toSet() }
                     }
                     for (key in listOf("isoSpeedRate","shutterSpeed","fNumber","exposureCompensation","shootMode","focusMode","exposureMode")) {
-                        if(x.has(key)) values[key.replaceFirstChar(Char::uppercaseChar)] = x.optString(key)
+                        val current="current"+key.replaceFirstChar(Char::uppercaseChar)
+                        val field=if(x.has(current)) current else key
+                        if(x.has(field)) values[key.replaceFirstChar(Char::uppercaseChar)] = x.optString(field)
                     }
                     // Camera-body shutter events report a postview URL after capture.
                     for (key in listOf("postviewImageUrl","imageUrl")) x.optString(key).takeIf { it.startsWith("http://") }?.let(urls::add)
@@ -97,9 +99,11 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
             }
         }
         visit(result)
-        state = state.copy(status=status,apis=apis,settings=state.settings.map { s ->
-            s.copy(current=values[s.key]?:s.current,writable="set${s.key}" in apis)
-        })
+        val settings=state.settings.map { s -> s.copy(current=values[s.key]?:s.current,writable="set${s.key}" in apis) }.toMutableList()
+        for((key,label) in listOf("IsoSpeedRate" to "ISO","ShutterSpeed" to "快门","FNumber" to "光圈","FocusMode" to "对焦模式","ExposureMode" to "曝光模式")) {
+            if(settings.none { it.key==key }) values[key]?.let { value -> settings += Setting(key,label,value,emptyList(),false) }
+        }
+        state = state.copy(status=status,apis=apis,settings=settings)
         return state to urls.distinct()
     }
     suspend fun takePicture(): List<String> {

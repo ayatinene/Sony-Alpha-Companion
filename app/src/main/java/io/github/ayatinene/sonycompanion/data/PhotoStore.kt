@@ -25,11 +25,12 @@ class PhotoStore(private val context: Context) {
             LocalPhoto(r.getString("uri"),r.getString("name"),r.getLong("bytes"),r.getLong("added"),r.getString("origin"),r.getString("source"),r.optString("pair",pairKey(r.getString("name"))))
         }.getOrNull() }.sortedByDescending { it.added }
     }
-    @Synchronized private fun save(photo: LocalPhoto) {
-        val array = JSONArray()
-        (listOf(photo)+list()).take(10000).forEach { p -> array.put(JSONObject().put("uri",p.uri).put("name",p.name).put("bytes",p.bytes).put("added",p.added).put("origin",p.origin).put("source",p.sourceId).put("pair",p.pairKey)) }
-        check(preferences.edit().putString("records",array.toString()).commit()) { "无法保存下载记录" }
+    private fun writeRecords(records: List<LocalPhoto>) {
+        val array=JSONArray()
+        records.forEach { p -> array.put(JSONObject().put("uri",p.uri).put("name",p.name).put("bytes",p.bytes).put("added",p.added).put("origin",p.origin).put("source",p.sourceId).put("pair",p.pairKey)) }
+        check(preferences.edit().putString("records",array.toString()).commit()) { "无法保存导入记录" }
     }
+    @Synchronized private fun save(photo: LocalPhoto) = writeRecords((listOf(photo)+list()).take(10000))
     @Synchronized private fun pending(uri: Uri, add: Boolean) {
         val items = preferences.getStringSet("pending",emptySet()).orEmpty().toMutableSet()
         if(add) items += uri.toString() else items -= uri.toString()
@@ -57,7 +58,7 @@ class PhotoStore(private val context: Context) {
                 }
                 transfer(counted); counted.flush()
             }
-            require(total>0 && (expected<=0 || total==expected)) { "文件长度不符：$total / $expected；已移除未完成文件" }
+            if(total<=0 || (expected>0 && total!=expected)) throw java.io.EOFException("文件长度不符：$total / $expected；已移除未完成文件")
             val photo = LocalPhoto(uri.toString(),safeName,total,System.currentTimeMillis(),origin,source)
             resolver.update(uri,ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING,0) },null,null)
             save(photo); pending(uri,false)
@@ -82,10 +83,19 @@ class PhotoStore(private val context: Context) {
         runCatching { resolver.loadThumbnail(Uri.parse(photo.uri),android.util.Size(400,400),null) }.getOrNull()
             ?: runCatching { resolver.openInputStream(Uri.parse(photo.uri))!!.use { ExifInterface(it).thumbnailBitmap } }.getOrNull()
     }
-    @Synchronized fun removeRecord(photo: LocalPhoto) {
-        val array=JSONArray()
-        list().filter { it.uri!=photo.uri }.forEach { p -> array.put(JSONObject().put("uri",p.uri).put("name",p.name).put("bytes",p.bytes).put("added",p.added).put("origin",p.origin).put("source",p.sourceId).put("pair",p.pairKey)) }
-        preferences.edit().putString("records",array.toString()).apply()
+    @Synchronized fun removeRecord(photo: LocalPhoto) = writeRecords(list().filter { it.uri!=photo.uri })
+    @Synchronized fun pruneMissing(): List<LocalPhoto> {
+        val records=list()
+        val valid=records.filter(::exists)
+        if(valid.size!=records.size) writeRecords(valid)
+        return valid
     }
-    fun exists(photo: LocalPhoto) = runCatching { resolver.openFileDescriptor(Uri.parse(photo.uri),"r")?.use { true } ?: false }.getOrDefault(false)
+    fun exists(photo: LocalPhoto) = runCatching {
+        val uri=Uri.parse(photo.uri)
+        val columns=if(android.os.Build.VERSION.SDK_INT>=30) arrayOf(MediaStore.Images.Media.IS_TRASHED) else arrayOf(MediaStore.Images.Media._ID)
+        val present=resolver.query(uri,columns,null,null,null)?.use { cursor ->
+            cursor.moveToFirst() && (android.os.Build.VERSION.SDK_INT<30 || cursor.getInt(0)==0)
+        } ?: false
+        present && (resolver.openFileDescriptor(uri,"r")?.use { it.statSize<0 || it.statSize==photo.bytes } ?: false)
+    }.getOrDefault(false)
 }

@@ -12,7 +12,10 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import okhttp3.Response
+import io.github.ayatinene.sonycompanion.BuildConfig
+import java.io.IOException
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.json.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -34,8 +37,11 @@ class CompanionController(private val context: Context) {
     private var connectionJob: Job? = null
     private var queueJob: Job? = null
     private var intervalJob: Job? = null
-    private var liveResponse: Response? = null
-    private var downloadResponse: Response? = null
+    private val thumbnailGate = Semaphore(1)
+    private var monitoringStop: Job? = null
+    private var lastDevice: Device? = null
+    private var lastRemote = RemoteState()
+    private var lastMode: CameraMode? = null
     private val shutter = Mutex()
     private val thumbs = LruCache<String,Bitmap>(48)
     private val importedUrls = linkedSetOf<String>()
@@ -63,7 +69,7 @@ class CompanionController(private val context: Context) {
         if(state.value.transferring) { update { copy(error="请先完成或取消文件传输") }; return }
         if(connectionJob?.isActive==true) return
         connectionJob = scope.launch {
-            disconnect(false)
+            disconnect()
             update { copy(mode=mode,busy=true,message="查找相机…",error=null,files=emptyList(),remote=RemoteState()) }
             try {
                 val networks = CameraNetwork(context)
@@ -109,7 +115,7 @@ class CompanionController(private val context: Context) {
             } catch(e: CancellationException) { throw e }
             catch(e: Exception) {
                 log("连接失败：${e.message}")
-                computer?.abort(); computer=null; smartphone=null; remote=null; http?.close(); http=null
+                withContext(Dispatchers.IO) { computer?.abort(); http?.close() }; computer=null; smartphone=null; remote=null; http=null
                 update { copy(connected=false,error=e.message,message="连接失败") }
             } finally { update { copy(busy=false) } }
         }
@@ -138,8 +144,7 @@ class CompanionController(private val context: Context) {
             while(isActive && attempts<3) {
                 try {
                     val url=camera.liveView()
-                    val response=requireNotNull(http).get(url); liveResponse=response
-                    response.use {
+                    requireNotNull(http).stream(url) {
                         val reader=LiveViewReader(requireNotNull(it.body).byteStream())
                         while(isActive) {
                             val bytes=reader.next()?:error("实时取景流结束")
@@ -153,23 +158,43 @@ class CompanionController(private val context: Context) {
             if(attempts>=3) update { copy(error="实时取景已停止，请重连相机") }
         }
     }
+    private fun stopMonitoring(): List<Job> {
+        val jobs=listOfNotNull(liveJob,eventJob,intervalJob)
+        liveJob=null; eventJob=null; intervalJob=null
+        jobs.forEach(Job::cancel)
+        return jobs
+    }
     fun setVisible(value: Boolean) {
         visible=value
-        if(value) { if(state.value.mode==CameraMode.REMOTE && state.value.connected) startMonitoring() }
-        else { intervalJob?.cancel(); liveResponse?.close(); liveJob?.cancel(); liveJob=null; eventJob?.cancel(); eventJob=null }
+        if(value) {
+            scope.launch {
+                monitoringStop?.join()
+                if(visible && state.value.mode==CameraMode.REMOTE && state.value.connected) startMonitoring()
+                refreshLocal()
+            }
+        } else {
+            val jobs=stopMonitoring()
+            monitoringStop=scope.launch { jobs.joinAll() }
+        }
     }
     suspend fun disconnect(finish: Boolean = true) {
-        liveResponse?.close(); liveResponse=null; liveJob?.cancel(); liveJob=null; eventJob?.cancel(); eventJob=null
-        intervalJob?.cancel(); intervalJob=null; frameState.value=null
-        if(finish) {
-            try { smartphone?.finish(); computer?.finish() }
-            catch(e: Exception) { log("结束会话：${e.message}") }
+        val snapshot=state.value
+        if(snapshot.device!=null) { lastDevice=snapshot.device; lastRemote=snapshot.remote; lastMode=snapshot.mode }
+        stopMonitoring().joinAll(); monitoringStop?.join(); frameState.value=null
+        val oldHttp=http; val oldComputer=computer; val oldSmartphone=smartphone
+        computer=null; remote=null; smartphone=null; http=null; selectedNetwork=null
+        withContext(NonCancellable+Dispatchers.IO) {
+            if(finish) {
+                try { withTimeout(3000) { oldSmartphone?.finish(); oldComputer?.finish() } }
+                catch(e: Exception) { log("结束会话：${e.message}") }
+            }
+            runCatching { oldComputer?.abort() }.onFailure { log("关闭原文件会话：${it.message}") }
+            oldHttp?.close()
         }
-        computer?.abort(); computer=null; remote=null; smartphone=null; http?.close(); http=null
-        selectedNetwork=null; thumbs.evictAll(); importedUrls.clear()
+        thumbs.evictAll(); importedUrls.clear()
         update { copy(connected=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") }
     }
-    fun endSession() { if(!state.value.transferring) scope.launch { disconnect() } }
+    fun endSession() { if(!state.value.transferring) action { disconnect() } }
     private fun action(block: suspend ()->Unit) { scope.launch {
         try { block() } catch(e: CancellationException) { throw e } catch(e: Exception) { log(e.message.orEmpty()); update { copy(error=e.message) } }
     } }
@@ -218,12 +243,12 @@ class CompanionController(private val context: Context) {
         finally { update { copy(busy=false) } }
     }
     fun root() { smartphone?.let { browse(it.rootId) } }
-    suspend fun thumbnail(file:CameraFile): Bitmap? = withContext(Dispatchers.IO) {
+    suspend fun thumbnail(file:CameraFile): Bitmap? = withContext(Dispatchers.IO) { thumbnailGate.withPermit {
         val key="${state.value.mode}:${file.id}"; thumbs.get(key)?.let { return@withContext it }
         try {
             val bytes = if(file.handle!=null) computer?.thumbnail(file.handle) else {
                 val url=file.thumbnail ?: file.bestResource()?.url ?: return@withContext null
-                http?.get(url)?.use { r ->
+                http?.stream(url) { r ->
                     val source=requireNotNull(r.body).source()
                     require(!source.request(4L*1024*1024+1)) { "缩略图过大" }; source.readByteArray()
                 }
@@ -233,7 +258,7 @@ class CompanionController(private val context: Context) {
             options.inSampleSize=(maxOf(options.outWidth,options.outHeight)/500).coerceAtLeast(1); options.inJustDecodeBounds=false
             BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)?.also { thumbs.put(key,it) }
         } catch(e: CancellationException) { throw e } catch(_: Exception) { null }
-    }
+    } }
     fun enqueue(files:List<CameraFile>) {
         if(!state.value.connected) return
         val queue=state.value.queue.toMutableList()
@@ -263,22 +288,32 @@ class CompanionController(private val context: Context) {
                         val source="${state.value.device?.model}|${state.value.mode}|${resource?.url?:file.id}"
                         val expected=resource?.size?:file.size
                         val existing=photos.list().firstOrNull { it.sourceId==source && (expected<=0||it.bytes==expected) && photos.exists(it) }
-                        if(existing==null) photos.import(name,isRaw,expected,source,state.value.mode?.title.orEmpty()) { out ->
-                            if(file.handle!=null) requireNotNull(computer).download(file,out,::progress)
-                            else requireNotNull(http).get(requireNotNull(resource).url).use { response ->
-                                downloadResponse=response
-                                val body=requireNotNull(response.body)
-                                val total=body.contentLength().takeIf { it>0 }?:expected
-                                body.byteStream().use { input ->
-                                    StreamCopy.copy(input,out,total,{ensureActive()},::progress)
+                        if(existing==null) {
+                            // Only repeat safe file GETs. Every failed attempt removes its pending file.
+                            val attempts=if(file.handle==null)3 else 1
+                            for(attempt in 1..attempts) {
+                                try {
+                                    photos.import(name,isRaw,expected,source,state.value.mode?.title.orEmpty()) { out ->
+                                        if(file.handle!=null) requireNotNull(computer).download(file,out,::progress)
+                                        else requireNotNull(http).stream(requireNotNull(resource).url) { response ->
+                                            val body=requireNotNull(response.body)
+                                            val total=body.contentLength().takeIf { it>0 }?:expected
+                                            log("下载 ${file.name}：HTTP ${response.code}，长度 $total，编码 ${response.header("Transfer-Encoding") ?: "fixed"}，第 $attempt 次")
+                                            body.byteStream().use { input -> StreamCopy.copy(input,out,total,{ensureActive()},::progress) }
+                                        }
+                                    }
+                                    break
+                                } catch(e: IOException) {
+                                    if(attempt==attempts) throw e
+                                    log("下载 ${file.name} 中断，重试 $attempt/${attempts-1}：${e.message}")
+                                    progress(0,expected); delay(400L*attempt)
                                 }
-                                downloadResponse=null
                             }
                         }
                         update { copy(queue=queue.map { if(it.file.id==file.id && it.state=="传输中") it.copy(state=if(existing!=null) "已存在" else "完成") else it },local=photos.list()) }
                     } catch(e: CancellationException) { throw e }
                     catch(e: Exception) {
-                        log("下载 ${file.name} 失败：${e.message}")
+                        log("下载 ${file.name} 失败：${e.javaClass.simpleName}: ${e.message}")
                         update { copy(queue=queue.map { if(it.file.id==file.id && it.state=="传输中") it.copy(state="失败",error=e.message) else it }) }
                     }
                 }
@@ -288,20 +323,50 @@ class CompanionController(private val context: Context) {
         }
         queueJob=job; job.join()
     }
-    fun cancelTransfers() { queueJob?.cancel(); downloadResponse?.close(); downloadResponse=null; if(state.value.mode==CameraMode.COMPUTER) computer?.abort() }
+    fun cancelTransfers() {
+        queueJob?.cancel()
+        if(state.value.mode==CameraMode.COMPUTER) { val transfer=computer; scope.launch(Dispatchers.IO) { transfer?.abort() } }
+    }
+    fun refreshLocal() = action {
+        val local=withContext(Dispatchers.IO) { photos.pruneMissing() }
+        update { copy(local=local) }
+    }
+    fun forgetPhoto(photo: LocalPhoto) = action {
+        withContext(Dispatchers.IO) { photos.removeRecord(photo) }
+        importedUrls.clear()
+        update { copy(local=photos.list(),message="已移除导入记录，手机中的文件保留") }
+    }
+    fun exportDiagnostics(uri: Uri) = action {
+        withContext(Dispatchers.IO) {
+            val bytes=diagnostics().toByteArray(Charsets.UTF_8)
+            requireNotNull(context.contentResolver.openOutputStream(uri,"wt")) { "无法打开诊断文件" }.use { it.write(bytes) }
+        }
+        update { copy(message="诊断信息已导出") }
+    }
     fun retryFailed() {
         val retry=state.value.queue.filter { it.state in listOf("失败","已取消") }.map { it.file }
         update { copy(queue=queue.filter { it.state !in listOf("失败","已取消") }) }; enqueue(retry)
     }
     fun clearCompleted() { update { copy(queue=queue.filter { it.state in listOf("等待","传输中") }) } }
-    fun diagnostics(): String = JSONObject().apply {
-        put("app","0.1.0-preview"); put("android",android.os.Build.VERSION.SDK_INT)
-        put("device","${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
-        put("cameraFirmwareUserProvided","4.01"); put("mode",state.value.mode?.name)
-        put("camera",state.value.device?.model); put("description",state.value.device?.description?.toString())
-        put("application",state.value.remote.application); put("apis",JSONArray(state.value.remote.apis.toList()))
-        put("eventVersion",state.value.remote.eventVersion); put("logs",JSONArray(state.value.logs))
-        synchronized(protocolResponses) { put("protocolResponses",JSONObject(protocolResponses.toMap())) }
-        put("hardwareVerified",false)
-    }.toString(2)
+    fun diagnostics(): String {
+        val snapshot=state.value
+        val previous=lastMode==snapshot.mode
+        val device=snapshot.device ?: lastDevice.takeIf { previous }
+        val remote=if(snapshot.remote.application.isNotBlank()) snapshot.remote else if(previous) lastRemote else snapshot.remote
+        return JSONObject().apply {
+            put("app",BuildConfig.VERSION_NAME); put("versionCode",BuildConfig.VERSION_CODE)
+            put("exportedAt",java.time.OffsetDateTime.now().toString()); put("android",android.os.Build.VERSION.SDK_INT)
+            put("device","${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
+            put("cameraFirmwareUserProvided","4.01"); put("mode",snapshot.mode?.name); put("connected",snapshot.connected)
+            put("camera",device?.model); put("description",device?.description?.toString())
+            put("application",remote.application); put("apis",JSONArray(remote.apis.toList()))
+            put("eventVersion",remote.eventVersion); put("logs",JSONArray(snapshot.logs))
+            put("queue",JSONArray(snapshot.queue.map { q -> JSONObject().apply {
+                put("name",q.file.name); put("state",q.state); put("received",q.received); put("total",q.total); put("error",q.error)
+                put("resource",q.file.bestResource()?.url)
+            } }))
+            synchronized(protocolResponses) { put("protocolResponses",JSONObject(protocolResponses.toMap())) }
+            put("lastCrash",CrashLog.read(context.filesDir))
+        }.toString(2)
+    }
 }

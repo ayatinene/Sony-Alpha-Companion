@@ -14,7 +14,7 @@ object StreamCopy {
             if(n==0)continue
             output.write(buffer,0,n);copied+=n;progress(copied,expected)
         }
-        require(copied>0 && (expected<=0||expected==copied)) { "下载长度不符：$copied / $expected" }
+        if(copied<=0 || (expected>0 && expected!=copied)) throw java.io.EOFException("下载长度不符：$copied / $expected")
         return copied
     }
 }
