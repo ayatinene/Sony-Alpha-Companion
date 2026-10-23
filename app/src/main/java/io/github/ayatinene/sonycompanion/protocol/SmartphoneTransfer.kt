@@ -6,9 +6,11 @@ package io.github.ayatinene.sonycompanion.protocol
 
 import io.github.ayatinene.sonycompanion.data.*
 import io.github.ayatinene.sonycompanion.network.CameraHttp
+import io.github.ayatinene.sonycompanion.network.CameraHttpError
 import java.net.URI
 
-class SmartphoneTransfer(private val device: Device, private val http: CameraHttp) {
+class SmartphoneTransfer(private val device: Device, private val http: CameraHttp,
+    private val report: (String) -> Unit = {}) {
     private val content = requireNotNull(device.content) { "未发现 ContentDirectory 服务" }
     var rootId = "PushRoot"; private set
     private var started = false
@@ -21,7 +23,18 @@ class SmartphoneTransfer(private val device: Device, private val http: CameraHtt
         return response
     }
     suspend fun initialize(): List<CameraFile> {
-        device.push?.let { soap(it, PUSH, "X_TransferStart", ""); started = true }
+        device.push?.let {
+            try {
+                soap(it, PUSH, "X_TransferStart", "")
+                started = true
+            } catch (e: CameraHttpError) {
+                if (e.code !in setOf(404, 405, 501)) throw e
+                report("X_TransferStart 不受支持（HTTP ${e.code}），继续 ContentDirectory 浏览")
+            } catch (e: SoapFault) {
+                if (e.code != "401") throw e // UPnP Invalid Action; HTTP 401 must still fail.
+                report("X_TransferStart 不受支持（UPnP 401），继续 ContentDirectory 浏览")
+            }
+        }
         return try { browse("PushRoot") } catch (e: SoapFault) {
             // A fault means the root is not available in this camera's selection mode.
             if (e.code !in setOf("701", "710", "501", "402")) throw e

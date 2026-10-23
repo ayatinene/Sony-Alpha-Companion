@@ -121,7 +121,7 @@ class CompanionController(private val context: Context) {
                         log("遥控连接成功 application=${capabilities.application} eventVersion=${capabilities.eventVersion} apis=${capabilities.apis.sorted()}",tag="CONNECT")
                         startMonitoring()
                     } else {
-                        val transfer=SmartphoneTransfer(device,transport); smartphone=transfer
+                        val transfer=SmartphoneTransfer(device,transport) { log(it,LogLevel.WARN,"BROWSE") }; smartphone=transfer
                         val files=transfer.initialize()
                         update { copy(connected=true,files=files,folder=transfer.rootId,message="JPEG 服务已连接 · ${transfer.rootId}") }
                         log("JPEG 连接成功 root=${transfer.rootId} entries=${files.size}",tag="CONNECT")
@@ -338,83 +338,134 @@ class CompanionController(private val context: Context) {
                                         else requireNotNull(http).stream(requireNotNull(resource).url) { response ->
                                             val body=requireNotNull(response.body)
                                             val total=body.contentLength().takeIf { it>0 }?:expected
-                                            log("下载 ${file.name}：HTTP ${response.code}，长度 $total，编码 ${response.header("Transfer-Encoding") ?: "fixed"}，第 $attempt 次")
-                                            body.byteStream().use { input -> StreamCopy.copy(input,out,total,{ensureActive()},::progress) }
-                                        }
-                                    }
-                                    break
-                                } catch(e: IOException) {
-                                    if(attempt==attempts) throw e
-                                    log("下载 ${file.name} 中断，重试 $attempt/${attempts-1}：${e.message}",LogLevel.WARN,"TRANSFER",e)
-                                    progress(0,expected); delay(400L*attempt)
-                                }
-                            }
-                        }
-                        update { copy(queue=queue.map { if(it.file.id==file.id && it.state=="传输中") it.copy(state=if(existing!=null) "已存在" else "完成") else it },local=photos.list()) }
-                        log("${file.name} ${if(existing!=null) "跳过有效本地文件" else "保存完成"}",tag="TRANSFER")
-                    } catch(e: CancellationException) { throw e }
-                    catch(e: Exception) {
-                        log("下载 ${file.name} 失败：${e.javaClass.simpleName}: ${e.message}",LogLevel.ERROR,"TRANSFER",e)
-                        update { copy(queue=queue.map { if(it.file.id==file.id && it.state=="传输中") it.copy(state="失败",error=e.message) else it }) }
+                                            log("下载 ${file.name}：HTTP ${response.code}，长度 $to…1690 tokens truncated…n, manual: String, computer: Boolean = false): List<Device> = withContext(Dispatchers.IO) {
+        val wifi = context.getSystemService(WifiManager::class.java)
+        val lock = wifi.createMulticastLock("alpha-discovery").apply { setReferenceCounted(false); acquire() }
+        val locations = linkedSetOf<URI>()
+        try {
+            if (manual.startsWith("http://")) {
+                val uri=URI(manual)
+                val device=CameraXml.description(http.getText(uri.toString()),uri)
+                require(if(remote)device.remote!=null else device.content!=null) { "描述文件未提供所选模式服务" }
+                return@withContext listOf(device)
+            }
+            DatagramSocket(null).use { socket ->
+                socket.reuseAddress = true
+                socket.bind(InetSocketAddress(0)); network.bindSocket(socket)
+                val targets = if (remote) listOf("urn:schemas-sony-com:service:ScalarWebAPI:1") else if(computer) listOf("urn:microsoft-com:service:MtpNullService:1") else listOf("ssdp:all")
+                repeat(2) {
+                    targets.forEach { st ->
+                        val data = "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: $st\r\n\r\n".toByteArray()
+                        socket.send(DatagramPacket(data, data.size, InetSocketAddress("239.255.255.250",1900)))
                     }
+                    delay(120)
                 }
-            } finally {
-                update { copy(transferring=false,queue=queue.map { if(it.state in listOf("等待","传输中")) it.copy(state="已取消") else it }) }
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4)
+                while (System.nanoTime() < deadline) {
+                    currentCoroutineContext().ensureActive()
+                    socket.soTimeout = 400
+                    val packet = DatagramPacket(ByteArray(8192),8192)
+                    try {
+                        socket.receive(packet)
+                        CameraXml.location(String(packet.data,0,packet.length))?.let(locations::add)
+                    } catch (_: SocketTimeoutException) { }
+                }
             }
-        }
-        queueJob=job; job.join()
+            val host = manual.takeIf { !it.contains("://") && it.isNotBlank() } ?: gateway(network)
+            val fallback = if (!remote && !computer && host != null) URI("http://$host:64321/DmsDescPush.xml") else null
+            resolveCameraDescriptions(locations.toList(), fallback, remote, computer) { uri -> http.getText(uri.toString()) }
+        } finally { if(lock.isHeld) lock.release() }
     }
-    fun cancelTransfers() {
-        log("请求取消下载",tag="TRANSFER")
-        queueJob?.cancel()
-        if(state.value.mode==CameraMode.COMPUTER) { val transfer=computer; scope.launch(Dispatchers.IO) { transfer?.abort() } }
-    }
-    fun refreshLocal() = action {
-        val local=withContext(Dispatchers.IO) { photos.pruneMissing() }
-        update { copy(local=local) }
-    }
-    fun forgetPhoto(photo: LocalPhoto) = action {
-        withContext(Dispatchers.IO) { photos.removeRecord(photo) }
-        importedUrls.clear()
-        update { copy(local=photos.list(),message="已移除导入记录，手机中的文件保留") }
-    }
-    fun exportDiagnostics(uri: Uri) = action {
-        log("开始导出日志与诊断",tag="EXPORT")
-        withContext(Dispatchers.IO) {
-            val logs=journal.snapshot()
-            val json=JSONObject(diagnostics()).put("logging",JSONObject().put("level",journal.minimum.name).put("session",journal.session)
-                .put("dropped",logs.dropped).put("writeFailures",logs.writeFailures)).toString(2)
-            requireNotNull(context.contentResolver.openOutputStream(uri,"wt")) { "无法打开诊断文件" }.use {
-                DiagnosticBundle.write(it,json,logs,CrashLog.read(context.filesDir))
+}
+
+/** SSDP describes the active service. A legacy descriptor can exist even when its service is inactive. */
+suspend fun resolveCameraDescriptions(
+    advertised: List<URI>, fallback: URI?, remote: Boolean, computer: Boolean = false,
+    read: suspend (URI) -> String
+): List<Device> {
+    suspend fun resolve(locations: List<URI>): List<Device> = locations.distinct().mapNotNull { uri ->
+        try {
+            val xml = read(uri)
+            if (computer && (!xml.contains("MtpNullService") || !xml.contains("Sony", true))) null
+            else CameraXml.description(xml, uri).takeIf {
+                if (computer) true else if (remote) it.remote != null else it.content != null
             }
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) { null }
+    }.distinctBy { if (computer) it.description.host else if (remote) it.remote else it.content }
+
+    val active = resolve(advertised)
+    if (active.isNotEmpty()) return active
+    return if (fallback != null && fallback !in advertised) resolve(listOf(fallback)) else emptyList()
+}
+
+class CameraHttpError(val code: Int) : java.io.IOException("相机 HTTP $code")
+
+/** All camera HTTP uses the selected Wi-Fi; mobile data stays available to other apps. */
+class CameraHttp(network: Network? = null, private val trace: (String,String)->Unit = {_,_->},
+    private val report: (LogLevel,String,Throwable?)->Unit = {_,_,_->}) : Closeable {
+    companion object { private val requestIds=AtomicLong() }
+    private val calls = ConcurrentHashMap.newKeySet<Call>()
+    val client = OkHttpClient.Builder().apply {
+        if (network != null) { socketFactory(network.socketFactory); dns(object:Dns { override fun lookup(hostname:String) = network.getAllByName(hostname).toList() }) }
+        connectTimeout(5,TimeUnit.SECONDS); readTimeout(65,TimeUnit.SECONDS)
+        followRedirects(false); retryOnConnectionFailure(false)
+    }.build()
+    private suspend fun execute(call: Call, allowSoapFault: Boolean): Response = suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object:Callback {
+            override fun onFailure(call:Call,e:java.io.IOException) {
+                if(continuation.isActive) continuation.resumeWithException(e)
+            }
+            override fun onResponse(call:Call,response:Response) {
+                if(!response.isSuccessful && !(allowSoapFault&&response.code==500)) {
+                    val code=response.code;response.close()
+                    if(continuation.isActive) continuation.resumeWithException(CameraHttpError(code))
+                } else continuation.resume(response) { _,value,_->value.close() }
+            }
+        })
+    }
+    // Cancellation must cancel the Call, not close a Response concurrently with its reader.
+    // Keep cancellation armed until the complete body has been consumed, not just the headers.
+    private suspend fun <T> exchange(request: Request, allowSoapFault: Boolean = false, operation: String = request.method, read: suspend (Response)->T): T =
+        withContext(Dispatchers.IO) { coroutineScope {
+            val call=client.newCall(request); calls += call
+            val id=requestIds.incrementAndGet();val start=System.nanoTime()
+            fun elapsed()=(System.nanoTime()-start)/1_000_000
+            report(LogLevel.DEBUG,"HTTP #$id → $operation ${request.url}",null)
+            val cancellation=launch(start=CoroutineStart.UNDISPATCHED) {
+                suspendCancellableCoroutine<Unit> { it.invokeOnCancellation { call.cancel() } }
+            }
+            try { execute(call,allowSoapFault).use { response ->
+                report(LogLevel.DEBUG,"HTTP #$id ← ${response.code} headers=${elapsed()}ms length=${response.body?.contentLength()} encoding=${response.header("Transfer-Encoding") ?: "fixed"}",null)
+                read(response).also { report(LogLevel.DEBUG,"HTTP #$id complete total=${elapsed()}ms",null) }
+            } }
+            catch(e: Exception) {
+                if(!currentCoroutineContext().isActive) {
+                    report(LogLevel.DEBUG,"HTTP #$id cancelled total=${elapsed()}ms",null)
+                    currentCoroutineContext().ensureActive()
+                }
+                report(LogLevel.WARN,"HTTP #$id failed total=${elapsed()}ms $operation ${request.url}",e)
+                throw e
+            }
+            finally { cancellation.cancel(); calls -= call }
+        } }
+    suspend fun <T> stream(url: String, read: suspend (Response)->T): T = exchange(
+        Request.Builder().url(url).header("Accept-Encoding","identity").header("Connection","close").get().build(),read=read)
+    suspend fun getText(url: String): String = stream(url) { r ->
+        val source = requireNotNull(r.body).source(); val out = okio.Buffer()
+        var total = 0L
+        while (true) { val n = source.read(out,8192); if(n < 0) break; total += n; require(total <= 8*1024*1024) { "响应过大" } }
+        out.readUtf8().also { trace("GET $url",it) }
+    }
+    suspend fun post(url: String, body: String, mime: String = "application/json; charset=utf-8", headers: Map<String,String> = emptyMap(), allowSoapFault: Boolean = false): String {
+        val request = Request.Builder().url(url).header("Connection","close").post(body.toRequestBody(mime.toMediaType())).apply { headers.forEach { (k,v) -> header(k,v) } }.build()
+        val operation=headers["SOAPACTION"] ?: runCatching { org.json.JSONObject(body).let { "${it.optString("method")} rpcId=${it.optInt("id")}" } }.getOrDefault("POST")
+        return exchange(request,allowSoapFault,operation) { response ->
+            val source = requireNotNull(response.body).source()
+            require(!source.request(8L*1024*1024+1)) { "响应过大" }
+            source.readUtf8().also { trace("POST $url ${headers["SOAPACTION"] ?: runCatching { org.json.JSONObject(body).optString("method") }.getOrDefault("")}",it) }
         }
-        log("日志与诊断导出完成",tag="EXPORT")
-        update { copy(message="日志与诊断已导出") }
     }
-    fun retryFailed() {
-        val retry=state.value.queue.filter { it.state in listOf("失败","已取消") }.map { it.file }
-        update { copy(queue=queue.filter { it.state !in listOf("失败","已取消") }) }; enqueue(retry)
-    }
-    fun clearCompleted() { update { copy(queue=queue.filter { it.state in listOf("等待","传输中") }) } }
-    fun diagnostics(): String {
-        val snapshot=state.value
-        val previous=lastMode==snapshot.mode
-        val device=snapshot.device ?: lastDevice.takeIf { previous }
-        val remote=if(snapshot.remote.application.isNotBlank()) snapshot.remote else if(previous) lastRemote else snapshot.remote
-        return JSONObject().apply {
-            put("app",BuildConfig.VERSION_NAME); put("versionCode",BuildConfig.VERSION_CODE)
-            put("exportedAt",java.time.OffsetDateTime.now().toString()); put("android",android.os.Build.VERSION.SDK_INT)
-            put("device","${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
-            put("cameraFirmwareUserProvided","4.01"); put("mode",snapshot.mode?.name); put("connected",snapshot.connected)
-            put("camera",device?.model); put("description",device?.description?.toString())
-            put("application",remote.application); put("apis",JSONArray(remote.apis.toList()))
-            put("eventVersion",remote.eventVersion); put("logs",JSONArray(snapshot.logs))
-            put("queue",JSONArray(snapshot.queue.map { q -> JSONObject().apply {
-                put("name",q.file.name); put("state",q.state); put("received",q.received); put("total",q.total); put("error",q.error)
-                put("resource",q.file.bestResource()?.url)
-            } }))
-            synchronized(protocolResponses) { put("protocolResponses",JSONObject(protocolResponses.toMap())) }
-            put("lastCrash",CrashLog.read(context.filesDir))
-        }.toString(2)
-    }
+    override fun close() { calls.forEach(Call::cancel); client.dispatcher.cancelAll(); client.connectionPool.evictAll() }
 }

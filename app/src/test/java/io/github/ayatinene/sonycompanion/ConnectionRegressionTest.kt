@@ -13,14 +13,6 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class ConnectionRegressionTest {
-    @Test fun pushDescriptorWinsRegardlessOfDiscoveryOrder() {
-        val base=Device("ILCE-7RM2","SonyImagingDevice",java.net.URI("http://127.0.0.1/dd.xml"),content=java.net.URI("http://127.0.0.1/cds"))
-        val push=base.copy(description=java.net.URI("http://127.0.0.1/DmsDescPush.xml"),push=java.net.URI("http://127.0.0.1/push"))
-        for(order in listOf(listOf(base,push),listOf(push,base))) {
-            val selected=preferCompleteDescriptions(order,false).single()
-            assertNotNull(selected.push)
-        }
-    }
     @Test fun cameraRequestsDoNotReuseLegacyConnections()=runBlocking {
         MockWebServer().use { server ->
             repeat(3) { server.enqueue(MockResponse().setBody("OK")) }

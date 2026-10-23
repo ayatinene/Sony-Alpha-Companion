@@ -58,30 +58,35 @@ class CameraNetwork(private val context: Context) {
                     } catch (_: SocketTimeoutException) { }
                 }
             }
-            // Documented legacy endpoint; acceptance still requires a real descriptor response.
-            if (!remote && !computer) {
-                val host = manual.takeIf { !it.contains("://") && it.isNotBlank() } ?: gateway(network)
-                if (host != null) locations += URI("http://$host:64321/DmsDescPush.xml")
-            }
-            val devices = locations.mapNotNull { uri ->
-                try {
-                    val xml=http.getText(uri.toString())
-                    if(computer && (!xml.contains("MtpNullService") || !xml.contains("Sony",true))) null
-                    else CameraXml.description(xml,uri)
-                }
-                catch (e: CancellationException) { throw e }
-                catch (_: Exception) { null }
-            }.filter { if(computer)true else if (remote) it.remote != null else it.content != null }.let { preferCompleteDescriptions(it,remote,computer) }
-            devices
+            val host = manual.takeIf { !it.contains("://") && it.isNotBlank() } ?: gateway(network)
+            val fallback = if (!remote && !computer && host != null) URI("http://$host:64321/DmsDescPush.xml") else null
+            resolveCameraDescriptions(locations.toList(), fallback, remote, computer) { uri -> http.getText(uri.toString()) }
         } finally { if(lock.isHeld) lock.release() }
     }
 }
 
-/** The generic dd.xml may omit XPushList while DmsDescPush.xml advertises it. */
-fun preferCompleteDescriptions(devices: List<Device>, remote: Boolean, computer: Boolean = false): List<Device> =
-    devices.sortedByDescending { it.push != null }.distinctBy {
-        if(computer) it.description.host else if(remote) it.remote else it.content
-    }
+/** SSDP describes the active service. A legacy descriptor can exist even when its service is inactive. */
+suspend fun resolveCameraDescriptions(
+    advertised: List<URI>, fallback: URI?, remote: Boolean, computer: Boolean = false,
+    read: suspend (URI) -> String
+): List<Device> {
+    suspend fun resolve(locations: List<URI>): List<Device> = locations.distinct().mapNotNull { uri ->
+        try {
+            val xml = read(uri)
+            if (computer && (!xml.contains("MtpNullService") || !xml.contains("Sony", true))) null
+            else CameraXml.description(xml, uri).takeIf {
+                if (computer) true else if (remote) it.remote != null else it.content != null
+            }
+        } catch (e: CancellationException) { throw e }
+        catch (_: Exception) { null }
+    }.distinctBy { if (computer) it.description.host else if (remote) it.remote else it.content }
+
+    val active = resolve(advertised)
+    if (active.isNotEmpty()) return active
+    return if (fallback != null && fallback !in advertised) resolve(listOf(fallback)) else emptyList()
+}
+
+class CameraHttpError(val code: Int) : java.io.IOException("相机 HTTP $code")
 
 /** All camera HTTP uses the selected Wi-Fi; mobile data stays available to other apps. */
 class CameraHttp(network: Network? = null, private val trace: (String,String)->Unit = {_,_->},
@@ -102,7 +107,7 @@ class CameraHttp(network: Network? = null, private val trace: (String,String)->U
             override fun onResponse(call:Call,response:Response) {
                 if(!response.isSuccessful && !(allowSoapFault&&response.code==500)) {
                     val code=response.code;response.close()
-                    if(continuation.isActive) continuation.resumeWithException(java.io.IOException("相机 HTTP $code"))
+                    if(continuation.isActive) continuation.resumeWithException(CameraHttpError(code))
                 } else continuation.resume(response) { _,value,_->value.close() }
             }
         })
