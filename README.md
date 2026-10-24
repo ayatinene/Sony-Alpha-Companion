@@ -2,7 +2,7 @@
 
 面向 **Sony α7R II（ILCE-7RM2）** 的个人 Android 客户端，采用 Material 3 界面。
 
-当前为 `0.1.7-preview` 预览版，A7R II 遥控与 JPEG 传输已有首轮反馈，稳定性仍在验证。
+当前为 `0.1.8-preview` 预览版，A7R II 遥控与 JPEG 传输已有首轮反馈，稳定性仍在验证。
 
 ## 功能
 

@@ -24,6 +24,17 @@ class JpegResourcesTest {
         assertEquals(JpegSize.ORIGINAL,explicit.jpegSize)
         assertEquals(explicit,file.copy(resources=listOf(large,explicit)).bestResource())
     }
+    @Test fun profileAttributesAreDelimitedAndCaseInsensitive() {
+        val lower=jpeg("large.jpg","DLNA.ORG_OP=01;dlna.org_pn=jpeg_lrg;DLNA.ORG_CI=0")
+        assertEquals(JpegSize.LARGE,lower.jpegSize)
+        assertEquals(JpegSize.THUMBNAIL,Resource("tn",profile="DLNA.ORG_PN=JPEG_TN").jpegSize)
+        assertEquals(JpegSize.ORIGINAL,jpeg("original.jpg","DLNA.ORG_OP=01;DLNA.ORG_CI=0").jpegSize)
+    }
+    @Test fun similarlyNamedOrEmptyProfileAttributesDoNotBecomeKnownSizes() {
+        assertNull(jpeg("empty.jpg","DLNA.ORG_PN=").jpegSize)
+        assertNull(jpeg("unknown.jpg","DLNA.ORG_PN=JPEG_UNKNOWN").jpegSize)
+        assertEquals(JpegSize.ORIGINAL,jpeg("other.jpg","X_DLNA.ORG_PN=JPEG_TN").jpegSize)
+    }
     @Test fun eachSelectionUsesItsActualDlnaProfile() {
         assertEquals(large,file.jpegResource(JpegSize.LARGE))
         assertEquals(small,file.jpegResource(JpegSize.SMALL))

@@ -1,6 +1,12 @@
 # 版本状态与已知问题
 
-版本：`0.1.7-preview`。目标设备：Sony α7R II（ILCE-7RM2），固件 4.01；Android 10 及以上。
+版本：`0.1.8-preview`。目标设备：Sony α7R II（ILCE-7RM2），固件 4.01；Android 10 及以上。
+
+## JPEG 连接闪退修复
+
+设备崩溃堆栈确认：`0.1.7-preview` 在读取相机目录时，JPEG 资源辅助类的正则初始化抛出 `PatternSyntaxException`，进而触发 `ExceptionInInitializerError` 并终止进程。
+
+本版移除该正则，直接按协议字段的冒号和分号分隔解析。Android 运行时回归测试新增资源分类、PushRoot 到 PhotoRoot 的回退，以及目录 / JPEG 资源解析，覆盖此次崩溃路径。
 
 ## 本轮图库、队列与拍摄界面
 
