@@ -1,38 +1,29 @@
-# 本轮工作进度
+# 工作进度
 
-状态：**修复 JPEG 连接闪退中**。版本 `0.1.8-preview` / versionCode 9。
+状态：**JPEG 连接闪退修复已完成**。版本 `0.1.8-preview` / versionCode 9。
+代码提交：`37e8dc718d56ae2a4107905e8fdecab322e73a7a`。
 
-2026-10-24 设备诊断确认 JPEG 资源分类的正则在 Android ICU 初始化失败。已移除正则，改用协议分隔字段；补充 2 项 JVM 边界测试和 2 项 Android 运行时协议回归测试。正在等待构建与模拟器检查。此前 0.1.7 的检查结果保留为历史记录，不代表本次修复已通过。
+## 本次修复
 
-用户已确认本轮五项范围，直接在 main 提交，push 已授权。备用续作任务已停用；不再扩大本轮范围。
+设备日志显示发现相机和 SOAP Browse 已成功；在解析返回目录时，JPEG 资源辅助类中的正则触发 Android `PatternSyntaxException`，导致类初始化失败并退出进程。
 
-## 已完成
+已移除该正则，按 protocolInfo 的冒号和分号字段读取 DLNA 资源类型。保留原尺寸 JPEG、大图、小图、缩略图的现有选择规则。
 
-1. 固定签名：用户已添加 ANDROID_SIGNING_BUNDLE，Debug / Release 共用固定密钥；Actions 校验恢复密钥及最终 APK 证书。私钥备份由用户保存，仓库只保留公开指纹。
-2. 多相机任务：UDN / PTP 序列号识别，按相机和模式持久保存队列；重连后点击“继续未完成”，读取当前目录核对文件信息后从头下载。身份不明不自动关联历史任务，文件信息不符时重新选择。
-3. 遥控布局：深色拍摄界面、横竖屏适配、常用曝光读数、侧边快门 / AF / 录像、原比例取景和构图线；全局导航在拍摄页收起。
-4. 相机图库：点图大图预览、翻页、双指缩放、双击放大、长按多选、信息及下载。预览临时缓存，显式下载才进入系统图库。
-5. 本地图库：网格、排序、筛选、大图、EXIF、分享、永久删除文件和仅清除记录。外部删除的失效记录会清理；RAW/JPEG 按来源、目录及同名主干建立轻量索引。
+新增两项 JVM 边界测试，以及两项 Android 运行时回归测试：资源辅助类初始化 / 分类，JPEG 服务初始化 / PushRoot 到 PhotoRoot 回退 / 文件夹及照片读取。原有四项界面检查继续执行。
 
-预览和缩略图按会话隔离；连接结束先阻止新任务；下载进度限频更新。查看器和拍摄页明确设置深色表面的前景色。
+## 验证与 APK
 
-## 验证与产物
+- [Android Debug 40065428726](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/40065428726)：82 项单元测试通过，0 失败 / 错误 / 跳过；lint 0 错误、33 警告；固定签名 APK 及证书校验通过。
+- [下载 APK](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/40065428726/artifacts/12548858625)。可覆盖安装 0.1.7 固定签名版本。
+- [Android 运行时检查 40065428733](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/40065428733)：6 项测试全部通过，包括新增的两项协议路径检查和原有四项界面检查。
 
-- [Android Debug 40002102959](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/40002102959)：80 项单元测试，0 失败 / 错误 / 跳过；lint 0 错误、33 警告；固定签名 APK 及证书校验成功。
-- [APK](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/40002102959/artifacts/12522222794)。
-- [Android UI 40002102916](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/40002102916)：Android 15 模拟器，4 项界面测试全部通过。覆盖横竖屏位置、缩放 / 翻页、本地文件与记录删除，以及深色图标可见性。
-- [界面报告与截图](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/40002102916/artifacts/12522757225)：横屏、竖屏、大图查看器和本地图库。截图使用测试状态和合成图片，不代表连接相机。
-- README、操作指南、支持矩阵、签名说明和版本状态已更新。
+用户下一次验证只需先检查：JPEG 连接、进入日期目录、打开一张照片预览。
 
-## 留待用户安排
+## 已有功能
 
-本轮不安排实机测试。上述功能已实现并通过对应自动检查，A7R II 和 vivo 手机上的本轮交互、真实多机身份及恢复行为仍待设备验证。
+固定签名、多相机身份与持久队列、横竖屏遥控、相机照片大图预览、本地图库文件删除与记录管理均保留。RAW/JPEG 沿用同来源 / 目录 / 主名的轻量关联，RAW 协议保持原有实验模块。
 
-RAW 保持原有实验模块，未增加新协议或 RAW 解码器。相机 ARW 使用缩略预览，本地 ARW 优先使用同名 JPEG，其次内嵌预览。
+## 协作
 
-首次由早期临时签名切换到固定签名，需卸载旧版一次；后续可覆盖更新。卸载前记下需要保留的连接设置并导出日志。
-
-## 后续协作约束
-
-GitHub 使用 ayatinene 连接器；直接 main，不创建分支 / PR。README 保持产品说明。
-若必须补充用户材料，保存代码和进度后集中询问；不索取 RawShare APK。
+使用 ayatinene GitHub 连接器直接提交 main，push 已授权；不创建分支 / PR。此前备用续作任务已停用。
+README 保持产品说明。若需要用户补充材料，先保存代码与进度后集中询问；不索取 RawShare APK。
