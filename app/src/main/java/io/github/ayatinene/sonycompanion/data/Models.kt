@@ -43,6 +43,9 @@ fun localPairKey(name: String, source: String): String {
 data class QueueItem(val file: CameraFile, val state: String = "等待", val received: Long = 0,
     val total: Long = file.size, val error: String? = null)
 data class AppState(val mode: CameraMode? = null, val connected: Boolean = false,
+    // `connecting` is owned by CompanionController.connect; `busy` is shared by browsing/USB/transfers and
+    // is not a connection signal.
+    val connecting: Boolean = false,
     val busy: Boolean = false, val message: String = "请连接相机", val error: String? = null,
     val device: Device? = null, val remote: RemoteState = RemoteState(),
     val files: List<CameraFile> = emptyList(), val folder: String = "", val queue: List<QueueItem> = emptyList(),

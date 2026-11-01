@@ -104,71 +104,75 @@ class CompanionController(private val context: Context) {
             log("USB GUID 登记完成，接收端设置已保存",tag="USB")
         } finally { update { copy(busy=false) } }
     }
-    fun connect(mode: CameraMode) {
-        if(state.value.busy) return
-        if(state.value.transferring) { update { copy(error="请先完成或取消文件传输") }; return }
-        if(connectionJob?.isActive==true) return
+    fun connect(mode: CameraMode): Boolean {
+        if(state.value.busy) return false
+        if(state.value.transferring) { update { copy(error="请先完成或取消文件传输") }; return false }
+        if(connectionJob?.isActive==true) return false
         connectionJob = scope.launch {
-            disconnect()
-            update { copy(mode=mode,busy=true,message="查找相机…",error=null,files=emptyList(),remote=RemoteState()) }
-            log("开始连接 mode=$mode",tag="CONNECT")
             try {
-                val networks = CameraNetwork(context)
-                val network = networks.wifi(); selectedNetwork=network
-                log("绑定 Wi-Fi network=$network",LogLevel.DEBUG,"CONNECT")
-                val transport = CameraHttp(network,trace={ label,response ->
-                    synchronized(protocolResponses) {
-                        if(protocolResponses.size>=30 && label !in protocolResponses) protocolResponses.remove(protocolResponses.keys.first())
-                        protocolResponses[label]=response.take(200_000)
-                    }
-                    log("$label\n${response.take(16000)}",LogLevel.TRACE,"PROTOCOL")
-                },report={level,message,error->log(message,level,"HTTP",error)}); http=transport
-                if(mode==CameraMode.COMPUTER) {
-                    val guid=prefs.getString("guid","").orEmpty()
-                    ComputerTransfer.parseGuid(guid)
-                    val host=prefs.getString("computerHost","").orEmpty().trim().ifBlank {
-                        val devices=networks.discover(network,transport,false,"",computer=true)
-                        require(devices.size==1) { "没有唯一的 MtpNullService 相机，请在设置填写相机的局域网 IP" }
-                        devices.single().description.host
-                    }
-                    val transfer=ComputerTransfer(network); computer=transfer
-                    val model=transfer.connect(host,guid)
-                    val device=Device(model,model,java.net.URI("http://$host"),serial=transfer.serial,
-                        identity=CameraIdentity(model=model,firmware=transfer.firmware))
-                    attachQueue(device,mode)
-                    update { copy(device=device,message="读取文件对象…") }
-                    val files=transfer.files { count-> update { copy(message="已读取 $count 个文件…") } }
-                    update { copy(connected=true,files=files,message="PTP/IP 已连接 · 尚未实机验证") }
-                } else {
-                    val devices = networks.discover(network,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
-                    require(devices.size==1) {
-                        if(devices.isEmpty()) "没有发现匹配服务。请确认相机工作模式、Wi-Fi 和附近设备权限；可在设置填写描述文件 URL。"
-                        else "发现多个相机，请在设置填写目标相机的描述文件 URL"
-                    }
-                    val device=devices.single(); log("发现 ${device.model} ${device.description} remote=${device.remote} content=${device.content} push=${device.push}",tag="CONNECT")
-                    attachQueue(device,mode)
-                    update { copy(device=device) }
-                    if(mode==CameraMode.REMOTE) {
-                        val camera=RemoteCamera(requireNotNull(device.remote).toString(),transport) { message -> log(message,if(message.startsWith("RPC"))LogLevel.DEBUG else LogLevel.WARN,"RPC") }; remote=camera
-                        val capabilities=camera.initialize()
-                        update { copy(connected=true,remote=capabilities,message="遥控已连接 · ${device.displayName}") }
-                        log("遥控连接成功 application=${capabilities.application} eventVersion=${capabilities.eventVersion} apis=${capabilities.apis.sorted()}",tag="CONNECT")
-                        startMonitoring()
+                update { copy(connecting=true) }
+                disconnect()
+                update { copy(mode=mode,busy=true,message="查找相机…",error=null,files=emptyList(),remote=RemoteState()) }
+                log("开始连接 mode=$mode",tag="CONNECT")
+                try {
+                    val networks = CameraNetwork(context)
+                    val network = networks.wifi(); selectedNetwork=network
+                    log("绑定 Wi-Fi network=$network",LogLevel.DEBUG,"CONNECT")
+                    val transport = CameraHttp(network,trace={ label,response ->
+                        synchronized(protocolResponses) {
+                            if(protocolResponses.size>=30 && label !in protocolResponses) protocolResponses.remove(protocolResponses.keys.first())
+                            protocolResponses[label]=response.take(200_000)
+                        }
+                        log("$label\n${response.take(16000)}",LogLevel.TRACE,"PROTOCOL")
+                    },report={level,message,error->log(message,level,"HTTP",error)}); http=transport
+                    if(mode==CameraMode.COMPUTER) {
+                        val guid=prefs.getString("guid","").orEmpty()
+                        ComputerTransfer.parseGuid(guid)
+                        val host=prefs.getString("computerHost","").orEmpty().trim().ifBlank {
+                            val devices=networks.discover(network,transport,false,"",computer=true)
+                            require(devices.size==1) { "没有唯一的 MtpNullService 相机，请在设置填写相机的局域网 IP" }
+                            devices.single().description.host
+                        }
+                        val transfer=ComputerTransfer(network); computer=transfer
+                        val model=transfer.connect(host,guid)
+                        val device=Device(model,model,java.net.URI("http://$host"),serial=transfer.serial,
+                            identity=CameraIdentity(model=model,firmware=transfer.firmware))
+                        attachQueue(device,mode)
+                        update { copy(device=device,message="读取文件对象…") }
+                        val files=transfer.files { count-> update { copy(message="已读取 $count 个文件…") } }
+                        update { copy(connected=true,files=files,message="PTP/IP 已连接 · 尚未实机验证") }
                     } else {
-                        val transfer=SmartphoneTransfer(device,transport) { log(it,LogLevel.WARN,"BROWSE") }; smartphone=transfer
-                        val files=transfer.initialize()
-                        update { copy(connected=true,files=files,folder=transfer.rootId,message="JPEG 服务已连接 · ${transfer.rootId}") }
-                        log("JPEG 连接成功 root=${transfer.rootId} entries=${files.size}",tag="CONNECT")
+                        val devices = networks.discover(network,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
+                        require(devices.size==1) {
+                            if(devices.isEmpty()) "没有发现匹配服务。请确认相机工作模式、Wi-Fi 和附近设备权限；可在设置填写描述文件 URL。"
+                            else "发现多个相机，请在设置填写目标相机的描述文件 URL"
+                        }
+                        val device=devices.single(); log("发现 ${device.model} ${device.description} remote=${device.remote} content=${device.content} push=${device.push}",tag="CONNECT")
+                        attachQueue(device,mode)
+                        update { copy(device=device) }
+                        if(mode==CameraMode.REMOTE) {
+                            val camera=RemoteCamera(requireNotNull(device.remote).toString(),transport) { message -> log(message,if(message.startsWith("RPC"))LogLevel.DEBUG else LogLevel.WARN,"RPC") }; remote=camera
+                            val capabilities=camera.initialize()
+                            update { copy(connected=true,remote=capabilities,message="遥控已连接 · ${device.displayName}") }
+                            log("遥控连接成功 application=${capabilities.application} eventVersion=${capabilities.eventVersion} apis=${capabilities.apis.sorted()}",tag="CONNECT")
+                            startMonitoring()
+                        } else {
+                            val transfer=SmartphoneTransfer(device,transport) { log(it,LogLevel.WARN,"BROWSE") }; smartphone=transfer
+                            val files=transfer.initialize()
+                            update { copy(connected=true,files=files,folder=transfer.rootId,message="JPEG 服务已连接 · ${transfer.rootId}") }
+                            log("JPEG 连接成功 root=${transfer.rootId} entries=${files.size}",tag="CONNECT")
+                        }
+                        loadIdentity(device,transport)
                     }
-                    loadIdentity(device,transport)
+                } catch(e: CancellationException) { throw e }
+                catch(e: Exception) {
+                    log("连接失败：${e.message}",LogLevel.ERROR,"CONNECT",e)
+                    withContext(Dispatchers.IO) { computer?.abort(); http?.close() }; computer=null; smartphone=null; remote=null; http=null
+                    update { copy(connected=false,error=e.message,message="连接失败") }
                 }
-            } catch(e: CancellationException) { throw e }
-            catch(e: Exception) {
-                log("连接失败：${e.message}",LogLevel.ERROR,"CONNECT",e)
-                withContext(Dispatchers.IO) { computer?.abort(); http?.close() }; computer=null; smartphone=null; remote=null; http=null
-                update { copy(connected=false,error=e.message,message="连接失败") }
-            } finally { update { copy(busy=false) } }
+            } finally { update { copy(connecting=false,busy=false) } }
         }
+        return true
     }
     private suspend fun attachQueue(device: Device, mode: CameraMode) {
         val key=queueScope(device,mode)
@@ -194,7 +198,7 @@ class CompanionController(private val context: Context) {
             catch(e: Exception) { log("附加相机信息：${e.message}",LogLevel.DEBUG,"DEVICE") }
         }
     }
-    fun reconnect() { state.value.mode?.let(::connect) }
+    fun reconnect() { val mode=state.value.mode ?: return; connect(mode) }
     private fun startMonitoring() {
         val camera=remote?:return
         if(!visible || eventJob?.isActive==true) return

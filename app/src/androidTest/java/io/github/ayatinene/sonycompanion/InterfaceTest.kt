@@ -17,7 +17,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.ayatinene.sonycompanion.data.*
 import io.github.ayatinene.sonycompanion.ui.*
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -36,28 +36,145 @@ class InterfaceTest {
             Setting("ShutterSpeed","快门","1/125",emptyList(),false),Setting("FNumber","光圈","5.6",emptyList(),false),
             Setting("ExposureCompensation","曝光补偿","0",emptyList(),false,3)),status="IDLE"))
 
-    @Test fun landscapePlacesExposureLeftAndShutterRight() {
+    private fun actions(onBack:()->Unit={},onDisconnect:()->Unit={})=RemoteActions(
+        onBack=onBack,onDisconnect=onDisconnect,onToggleGrid={},onTools={},onFocus={},onCapture={},onMovie={},onSetSetting={_,_->})
+
+    private fun landscapeImage()=Bitmap.createBitmap(600,400,Bitmap.Config.ARGB_8888).apply { eraseColor(0xff3d566e.toInt()) }
+    private fun bounds(tag:String)=compose.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+
+    @Test fun landscapeMaximizesTheImageAndFloatsControlsAtTheEdges() {
         compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
-            Box(Modifier.size(width=740.dp,height=340.dp)) { RemoteScreen(remote,controller,{}, {}) }
+            Box(Modifier.size(740.dp,340.dp)) { RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
         } }
-        val parameter=compose.onNodeWithText("ISO").fetchSemanticsNode().boundsInRoot.center
-        val viewfinder=compose.onNodeWithTag("remote-viewfinder").fetchSemanticsNode().boundsInRoot.center
-        val shutter=compose.onNodeWithContentDescription("拍照").assertIsEnabled().fetchSemanticsNode().boundsInRoot.center
-        assertTrue(parameter.x<viewfinder.x);assertTrue(viewfinder.x<shutter.x)
-        compose.onNodeWithContentDescription("开始录像").assertIsEnabled()
-        assertBrightIcon(compose.onNodeWithContentDescription("返回工作台"))
+        val screen=bounds("remote-screen"); val viewfinder=bounds("remote-viewfinder")
+        assertEquals("3:2 keeps its aspect",1.5f,viewfinder.width/viewfinder.height,0.02f)
+        assertEquals("height limited",screen.height,viewfinder.height,3f)
+        assertEquals("image stays centred",screen.center.x,viewfinder.center.x,3f)
+        val parameter=bounds("remote-params"); val shutter=bounds("remote-controls")
+        assertTrue("exposure stays at the left edge",parameter.right<=viewfinder.center.x)
+        assertTrue("controls stay at the right edge",shutter.left>=viewfinder.center.x)
         capture("remote-landscape",compose.onNodeWithTag("remote-screen"))
     }
-    @Test fun portraitPlacesExposureAndShutterBelowTheViewfinder() {
+
+    @Test fun portraitUsesTheFullWidthAndStacksThePanelBelowTheImage() {
         compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
-            Box(Modifier.size(width=360.dp,height=640.dp)) { RemoteScreen(remote,controller,{}, {}) }
+            Box(Modifier.size(360.dp,640.dp)) { RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
         } }
-        val parameter=compose.onNodeWithText("ISO").fetchSemanticsNode().boundsInRoot.center
-        val viewfinder=compose.onNodeWithTag("remote-viewfinder").fetchSemanticsNode().boundsInRoot.center
-        val shutter=compose.onNodeWithContentDescription("拍照").fetchSemanticsNode().boundsInRoot.center
-        assertTrue(viewfinder.y<parameter.y);assertTrue(parameter.y<shutter.y)
+        val screen=bounds("remote-screen"); val viewfinder=bounds("remote-viewfinder"); val region=bounds("remote-region"); val panel=bounds("remote-panel")
+        assertEquals("viewfinder uses the full width",screen.width,viewfinder.width,3f)
+        assertEquals("3:2 keeps its aspect",1.5f,viewfinder.width/viewfinder.height,0.02f)
+        assertTrue("image fits the frame region",viewfinder.bottom<=region.bottom+1f)
+        assertTrue("panel never covers the image",viewfinder.bottom<=panel.top+1f)
+        val parameter=bounds("remote-panel")
+        val shutter=compose.onNodeWithContentDescription("拍照").fetchSemanticsNode().boundsInRoot
+        assertTrue(viewfinder.center.y<shutter.center.y)
+        assertFalse("controls must not cover the frame centre",parameter.contains(viewfinder.center))
+        assertFalse(shutter.contains(viewfinder.center))
         capture("remote-portrait",compose.onNodeWithTag("remote-screen"))
     }
+
+    @Test fun gridFollowsTheRenderedImageRect() {
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(740.dp,340.dp)) { RemoteWorkspace(remote,landscapeImage(),true,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
+        } }
+        val viewfinder=bounds("remote-viewfinder"); val grid=bounds("remote-grid")
+        assertEquals(viewfinder.left,grid.left,0.5f)
+        assertEquals(viewfinder.top,grid.top,0.5f)
+        assertEquals(viewfinder.width,grid.width,0.5f)
+        assertEquals(viewfinder.height,grid.height,0.5f)
+    }
+
+    @Test fun smallLandscapeKeepsColumnsBelowTheHeaderAndScrollable() {
+        val insets=WorkspaceInsets(top=20.dp,bottom=12.dp,left=8.dp,right=8.dp)
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(320.dp,240.dp)) { RemoteWorkspace(remote,landscapeImage(),false,insets,actions(),remember { SnackbarHostState() }) }
+        } }
+        val screen=bounds("remote-screen"); val header=bounds("remote-header")
+        val parameter=bounds("remote-params"); val controls=bounds("remote-controls"); val viewfinder=bounds("remote-viewfinder")
+        val density=screen.width/320f
+        assertTrue("params clear the header",parameter.top>=header.bottom-1f)
+        assertTrue("controls clear the header",controls.top>=header.bottom-1f)
+        assertTrue("params stay inside the bottom inset",parameter.bottom<=screen.bottom-12*density+1f)
+        assertTrue("controls stay inside the bottom inset",controls.bottom<=screen.bottom-12*density+1f)
+        assertTrue("params stay off the centre",parameter.right<=viewfinder.center.x+1f)
+        assertTrue("controls stay off the centre",controls.left>=viewfinder.center.x-1f)
+        assertTrue("columns do not overlap",parameter.right<=controls.left+1f)
+        capture("remote-small-landscape",compose.onNodeWithTag("remote-screen"))
+    }
+
+    @Test fun landscapeInsetsPushControlsAwayFromTheEdges() {
+        val insets=WorkspaceInsets(top=0.dp,bottom=0.dp,left=40.dp,right=40.dp)
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(740.dp,340.dp)) { RemoteWorkspace(remote,landscapeImage(),false,insets,actions(),remember { SnackbarHostState() }) }
+        } }
+        val screen=bounds("remote-screen"); val parameter=bounds("remote-params"); val controls=bounds("remote-controls")
+        val density=screen.width/740f
+        assertTrue(parameter.left>=screen.left+40*density-1f)
+        assertTrue(controls.right<=screen.right-40*density+1f)
+    }
+
+    @Test fun shortScreenPanelLeavesTheWholeImageVisible() {
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(360.dp,480.dp)) { RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
+        } }
+        val region=bounds("remote-region"); val viewfinder=bounds("remote-viewfinder"); val panel=bounds("remote-panel")
+        assertEquals("aspect preserved",1.5f,viewfinder.width/viewfinder.height,0.02f)
+        assertTrue("whole image inside the region",viewfinder.bottom<=region.bottom+1f)
+        assertTrue("panel below the image",viewfinder.bottom<=panel.top+1f)
+    }
+
+    @Test fun veryShortScreenShrinksTheImageInsteadOfCropping() {
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(360.dp,420.dp)) { RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
+        } }
+        val region=bounds("remote-region"); val viewfinder=bounds("remote-viewfinder"); val panel=bounds("remote-panel")
+        assertEquals("aspect preserved",1.5f,viewfinder.width/viewfinder.height,0.02f)
+        assertTrue("image uses the remaining height",viewfinder.height<=region.height+1f)
+        assertTrue("panel below the image",viewfinder.bottom<=panel.top+1f)
+    }
+
+    @Test fun connectingWorkspaceShowsThePlaceholderAndDisablesTheShutter() {
+        val connecting=remote.copy(connected=false,connecting=true)
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(360.dp,640.dp)) { RemoteWorkspace(connecting,null,false,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
+        } }
+        compose.onNodeWithTag("remote-placeholder").assertExists()
+        compose.onNodeWithContentDescription("拍照").assertIsNotEnabled()
+    }
+
+    @Test fun workspaceBackReturnsWithoutDisconnectingTheSession() {
+        var back=false; var disconnected=false
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(360.dp,640.dp)) { RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(onBack={back=true},onDisconnect={disconnected=true}),remember { SnackbarHostState() }) }
+        } }
+        compose.onNodeWithContentDescription("返回工作台").performClick()
+        compose.runOnIdle { assertTrue(back);assertFalse("returning must not tear down the session",disconnected) }
+    }
+
+    @Test fun immersiveWorkspaceShowsSnackbarErrors() {
+        val host=SnackbarHostState()
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(360.dp,640.dp)) {
+                RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(),host)
+                LaunchedEffect(Unit) { host.showSnackbar("连接失败，请重试") }
+            }
+        } }
+        compose.waitUntil(5_000) { compose.onAllNodesWithText("连接失败，请重试").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("连接失败，请重试").assertExists()
+    }
+
+    @Test fun disconnectedShellHasNoCameraTabAndShowsNotConnected() {
+        runBlocking { controller.disconnect(false) }
+        val app=context.applicationContext as CompanionApplication
+        val model=CompanionViewModel(app)
+        compose.setContent { CompanionApp(model,{}, {}) }
+        compose.onNodeWithText("首页").assertExists()
+        compose.onNodeWithText("本地").assertExists()
+        compose.onNodeWithText("设置").assertExists()
+        compose.onNodeWithText("相机").assertDoesNotExist()
+        compose.onNodeWithText("未连接").assertExists()
+    }
+
     @Test fun viewerSupportsDoubleTapZoomResetAndNextImage() {
         val bitmap=Bitmap.createBitmap(600,400,Bitmap.Config.ARGB_8888).apply { eraseColor(0xff5b7794.toInt()) }
         var dismissed=false
@@ -74,6 +191,7 @@ class InterfaceTest {
         compose.onNodeWithContentDescription("关闭预览").performClick()
         compose.runOnIdle { assertTrue(dismissed) }
     }
+
     @Test fun fileDeletionRemovesMediaAndImportRecord() {
         val bytes=ByteArrayOutputStream().also { out -> Bitmap.createBitmap(40,30,Bitmap.Config.ARGB_8888).compress(Bitmap.CompressFormat.JPEG,90,out) }.toByteArray()
         val photo=runBlocking { controller.photos.import("UI_${System.nanoTime()}.JPG",false,bytes.size.toLong(),"ui-test","界面测试") { it.write(bytes) } }
@@ -90,6 +208,7 @@ class InterfaceTest {
             assertFalse(controller.photos.list().any { it.uri==photo.uri })
         } finally { runCatching { controller.photos.deleteFile(photo) } }
     }
+
     private fun assertBrightIcon(node: SemanticsNodeInteraction) {
         val bitmap=node.captureToImage().asAndroidBitmap()
         var bright=0

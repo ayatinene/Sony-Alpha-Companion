@@ -1,40 +1,43 @@
 # Sony Alpha Companion
 
-面向 **Sony α7R II（ILCE-7RM2）** 的个人 Android 客户端，采用 Material 3 界面。
+给 Sony α7R II（ILCE-7RM2）用的 Android 客户端，当前版本 `0.1.9-preview`。
 
-当前为 `0.1.8-preview` 预览版，A7R II 遥控与 JPEG 传输已有首轮反馈，稳定性仍在验证。
+## 能做什么
 
-## 功能
+- 遥控拍摄（机内 Smart Remote Control）：实时取景、快门、曝光参数、自动对焦、录像和间隔拍摄。具体能调哪些参数取决于相机机内 Smart Remote 应用开放的接口。
+- JPEG 传输（机内 Send to Smartphone）：浏览相机文件夹、大图预览与缩放、长按多选下载，可选相机提供的不同 JPEG 尺寸。
+- RAW / 原文件传输（机内 Send to Computer，实验性）：在局域网下通过 PTP/IP 下载原始 `.ARW` 和 `.JPG`。需要先用电脑或应用设置里的实验性 USB OTG 工具把接收端 GUID 登记到相机。
+- 相机图库导入队列按相机标识和传输模式保存；重连同一台相机后，可核对目录并从头继续未完成的图库下载。
+- 本地图库保存在 `DCIM/AlphaCompanion`，支持看大图、看 EXIF、同名 RAW/JPEG 关联、分享，也可以单独清除导入记录或直接删除照片文件。
 
-- **遥控拍摄**：实时取景、横屏拍摄布局、快门、曝光参数、自动对焦、录像和间隔拍摄。可用控制取决于相机开放的能力。
-- **JPEG 传输**：相机图库、大图预览与缩放、长按多选、下载进度、取消与重试。下载尺寸以相机实际提供的资源为准。
-- **本地图库**：大图预览、EXIF、RAW/JPEG 同名识别、筛选、分享、文件删除与导入记录管理。照片保存到 `DCIM/AlphaCompanion`。
-- **RAW / 原文件传输（实验性）**：支持实验性 USB OTG 接收端登记，或使用电脑已登记的 GUID 连接。
-- 下载队列按相机和模式分别保存；重新连接后可核对文件并继续未完成任务。
-- 支持浅色、深色和动态配色，以及分级日志和诊断包导出。
+## 安装与连接
 
-## 安装与使用
+在 [GitHub Actions](https://github.com/ayatinene/Sony-Alpha-Companion/actions) 打开最近一次成功的构建，下载 `Alpha-Companion-Debug-APK`，解压后安装 APK（支持 Android 10 及以上）。
 
-在 [GitHub Actions](https://github.com/ayatinene/Sony-Alpha-Companion/actions) 中打开成功的构建，下载 `Alpha-Companion-Debug-APK`，解压后安装 APK。支持 Android 10 及以上版本。
+仓库构建的预览版使用固定签名，后续版本可直接覆盖安装；如果手机上装过早期临时签名版本，第一次切换时需要先卸载旧版，详见 [APK 签名说明](docs/SIGNING.md)。
 
-正式分发的预览 APK 使用固定签名；首次从早期临时签名版本切换时需卸载旧版，之后可覆盖更新。
+连接步骤：先在相机上进入对应模式（Smart Remote、发送到智能手机、发送到电脑），再到手机系统 Wi-Fi 里连上相机网络（RAW 模式需要相机和手机连同一个路由器/热点），最后打开应用连接。
 
-先在相机选择工作模式，再用系统 Wi-Fi 设置连接相机网络，最后在应用首页连接对应模式。
+## 文档导航
 
-- [实机测试与操作指南](docs/DEVICE_TEST.md)
-- [功能支持矩阵](docs/SUPPORT.md)
-- [版本状态与已知问题](docs/STATUS.md)
+- [实机操作与测试说明](docs/DEVICE_TEST.md)
+- [功能支持表](docs/SUPPORT.md)
+- [版本状态与限制](docs/STATUS.md)
+- [日志与诊断说明](docs/LOGGING.md)
+- [协议边界与上游参考](docs/PROTOCOL_RESEARCH.md)
+- [代码复用与许可](docs/REUSE.md)
+- [APK 签名说明](docs/SIGNING.md)
 
 ## 构建
 
-使用 Android Studio，或 JDK 17、Android SDK 36 和 Build Tools 35.0.0：
+需要 Android Studio，或 JDK 17、Android SDK 36、Build Tools 35.0.0：
 
 ```sh
 ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
-Windows 使用 `gradlew.bat`。构建产物位于 `app/build/outputs/apk/debug/app-debug.apk`。
+Windows 使用 `gradlew.bat`，构建产物位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
-## 许可
+## 许可证
 
-项目采用 [GPL-3.0](LICENSE)。第三方代码来源和许可见 [复用说明](docs/REUSE.md) 与 [licenses](licenses)。
+项目采用 [GPL-3.0](LICENSE)。第三方代码来源、修改记录和许可证原文见 [docs/REUSE.md](docs/REUSE.md) 与 [licenses/](licenses/)。

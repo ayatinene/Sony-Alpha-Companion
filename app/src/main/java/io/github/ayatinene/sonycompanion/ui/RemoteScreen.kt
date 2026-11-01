@@ -1,5 +1,10 @@
 package io.github.ayatinene.sonycompanion.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -10,104 +15,203 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.*
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.ayatinene.sonycompanion.data.*
 
-@Composable fun RemoteScreen(state: AppState, c: CompanionController, onBack: ()->Unit, openWifi: ()->Unit) {
+private val workspaceShape=RoundedCornerShape(10.dp)
+private val scrim=Color.Black.copy(alpha=0.45f)
+private val headerReserve=56.dp
+
+/** Safe-area insets the controls must avoid; the image may extend underneath them. */
+data class WorkspaceInsets(val top:Dp=0.dp,val bottom:Dp=0.dp,val left:Dp=0.dp,val right:Dp=0.dp)
+
+data class RemoteActions(
+    val onBack:()->Unit,
+    val onDisconnect:()->Unit,
+    val onToggleGrid:()->Unit,
+    val onTools:()->Unit,
+    val onFocus:()->Unit,
+    val onCapture:()->Unit,
+    val onMovie:()->Unit,
+    val onSetSetting:(String,String)->Unit
+)
+
+@Composable fun RemoteScreen(state:AppState,c:CompanionController,snackbar:SnackbarHostState,onBack:()->Unit,openWifi:()->Unit) {
     val image by c.frame.collectAsStateWithLifecycle()
     var grid by rememberSaveable { mutableStateOf(false) }
-    var advanced by remember { mutableStateOf(false) }
-    Surface(Modifier.fillMaxSize(),color=Color(0xFF080B0E),contentColor=MaterialTheme.colorScheme.onSurface) {
-    Column(Modifier.fillMaxSize().testTag("remote-screen")) {
-        Row(Modifier.fillMaxWidth().heightIn(min=48.dp),verticalAlignment=Alignment.CenterVertically) {
-            IconButton(onClick=onBack) { Icon(Icons.Outlined.ArrowBack,"返回工作台") }
-            Column(Modifier.weight(1f)) {
-                Text(state.device?.displayName ?: "连接相机…",style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
-                Text(if(state.connected)state.remote.status.ifBlank { "已连接" }else state.message,style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant,maxLines=1)
-            }
-            IconToggleButton(grid,{grid=it}) { Icon(Icons.Outlined.Grid3x3,"构图网格") }
-            IconButton(onClick={advanced=true}) { Icon(Icons.Outlined.Tune,"拍摄工具") }
-            IconButton(onClick=c::endSession,enabled=!state.transferring&&!state.busy) { Icon(Icons.Outlined.LinkOff,"断开相机") }
-        }
-        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-            val landscape=maxWidth>maxHeight
-            val parameterWidth=if(state.remote.settings.size in 1..4)
-                ((maxWidth-16.dp-6.dp*(state.remote.settings.size-1))/state.remote.settings.size).coerceAtLeast(72.dp) else 112.dp
-            val viewfinder: @Composable (Modifier)->Unit = { modifier ->
-                BoxWithConstraints(modifier.background(Color.Black).testTag("remote-viewfinder"),contentAlignment=Alignment.Center) {
-                    val ratio=image?.let { it.width.toFloat()/it.height } ?: 3f/2
-                    val fitted=if(maxWidth/maxHeight>ratio) Modifier.fillMaxHeight().aspectRatio(ratio)
-                        else Modifier.fillMaxWidth().aspectRatio(ratio)
-                    Box(fitted,contentAlignment=Alignment.Center) {
-                        if(image!=null) Image(image!!.asImageBitmap(),"实时取景",Modifier.fillMaxSize(),contentScale=ContentScale.Fit)
-                        else Column(horizontalAlignment=Alignment.CenterHorizontally) {
-                            Icon(Icons.Outlined.Videocam,null,tint=Color.LightGray)
-                            Text(if(state.busy)"连接中…" else if("startLiveview" in state.remote.apis)"等待实时画面…" else "相机未开放实时取景",color=Color.LightGray,style=MaterialTheme.typography.bodySmall)
-                        }
-                        if(grid) Canvas(Modifier.matchParentSize()) { for(i in 1..2) {
-                            drawLine(Color.White.copy(alpha=.4f),Offset(size.width*i/3,0f),Offset(size.width*i/3,size.height),1f)
-                            drawLine(Color.White.copy(alpha=.4f),Offset(0f,size.height*i/3),Offset(size.width,size.height*i/3),1f)
-                        } }
-                    }
-                }
-            }
-            if(landscape) Row(Modifier.fillMaxSize(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                Column(Modifier.width(132.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(start=8.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
-                    ExposureControls(state,c)
-                }
-                viewfinder(Modifier.weight(1f).fillMaxHeight())
-                Column(Modifier.width(84.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(vertical=8.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(18.dp,Alignment.CenterVertically)) {
-                    FocusControl(state,c); ShutterControl(state,c); MovieControl(state,c)
-                }
-            } else Column(Modifier.fillMaxSize()) {
-                viewfinder(Modifier.weight(1f).fillMaxWidth())
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(8.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-                    if(state.remote.settings.isEmpty()) Text("曝光参数请在机身调节",Modifier.padding(8.dp),style=MaterialTheme.typography.bodySmall)
-                    state.remote.settings.forEach { setting -> Box(Modifier.width(parameterWidth)) { SettingControl(setting) { c.setSetting(setting.key,it) } } }
-                }
-                Row(Modifier.fillMaxWidth().padding(bottom=12.dp,top=4.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceEvenly) {
-                    FocusControl(state,c); ShutterControl(state,c); MovieControl(state,c)
-                }
-            }
-        }
-    }
-    }
+    var advanced by rememberSaveable { mutableStateOf(false) }
+    val insets=rememberWorkspaceInsets()
+    RemoteWorkspace(state,image,grid,insets,RemoteActions(
+        onBack=onBack,onDisconnect=c::endSession,onToggleGrid={grid=!grid},onTools={advanced=true},
+        onFocus=c::focus,onCapture=c::capture,onMovie=c::movie,onSetSetting=c::setSetting),snackbar)
     if(advanced) CaptureTools(state,c,onDismiss={advanced=false},openWifi=openWifi)
 }
 
-@Composable private fun ExposureControls(state: AppState, c: CompanionController) {
-    state.remote.settings.forEach { setting -> SettingControl(setting) { c.setSetting(setting.key,it) } }
-    if(state.remote.settings.isEmpty()) Text("曝光参数请在机身调节",Modifier.padding(8.dp),style=MaterialTheme.typography.bodySmall)
+/**
+ * Portrait stacks header / frame / panel so controls never cover the picture; landscape keeps the frame
+ * full-bleed and floats bounded, scrollable columns at the edges. The image is fitted with [containRect].
+ */
+@Composable fun RemoteWorkspace(state:AppState,image:Bitmap?,grid:Boolean,insets:WorkspaceInsets,actions:RemoteActions,snackbar:SnackbarHostState) {
+    BackHandler { actions.onBack() }
+    ImmersiveSystemBars()
+    Surface(Modifier.fillMaxSize(),color=Color.Black,contentColor=Color.White) {
+        BoxWithConstraints(Modifier.fillMaxSize().testTag("remote-screen")) {
+            if(maxWidth<maxHeight) PortraitWorkspace(state,image,grid,insets,actions)
+            else LandscapeWorkspace(state,image,grid,insets,actions)
+            SnackbarHost(snackbar,Modifier.align(Alignment.TopCenter).padding(top=insets.top+headerReserve,start=insets.left+8.dp,end=insets.right+8.dp))
+        }
+    }
 }
-@Composable private fun FocusControl(state: AppState,c: CompanionController) {
-    OutlinedButton(onClick=c::focus,enabled=state.connected && "actHalfPressShutter" in state.remote.apis && "cancelHalfPressShutter" in state.remote.apis,
-        shape=RoundedCornerShape(8.dp),contentPadding=PaddingValues(horizontal=16.dp,vertical=10.dp)) { Text("AF") }
+
+@Composable private fun PortraitWorkspace(state:AppState,image:Bitmap?,grid:Boolean,insets:WorkspaceInsets,actions:RemoteActions) {
+    Column(Modifier.fillMaxSize()) {
+        WorkspaceHeader(state,grid,actions,Modifier.fillMaxWidth().testTag("remote-header").padding(top=insets.top+4.dp,start=insets.left+8.dp,end=insets.right+8.dp))
+        Spacer(Modifier.height(4.dp))
+        Box(Modifier.fillMaxWidth().weight(1f).background(Color.Black).testTag("remote-region")) {
+            ViewFinder(state,image,grid,Modifier.fillMaxSize())
+        }
+        BottomPanel(state,actions,Modifier.fillMaxWidth().testTag("remote-panel").padding(top=4.dp,bottom=insets.bottom+4.dp,start=insets.left+8.dp,end=insets.right+8.dp))
+    }
 }
-@Composable private fun ShutterControl(state: AppState,c: CompanionController) {
+
+@Composable private fun BoxWithConstraintsScope.LandscapeWorkspace(state:AppState,image:Bitmap?,grid:Boolean,insets:WorkspaceInsets,actions:RemoteActions) {
+    ViewFinder(state,image,grid,Modifier.fillMaxSize())
+    WorkspaceHeader(state,grid,actions,Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top=insets.top+4.dp,start=insets.left+8.dp,end=insets.right+8.dp).testTag("remote-header"))
+    val top=insets.top+headerReserve
+    val available=(maxHeight-top-insets.bottom-8.dp).coerceAtLeast(0.dp)
+    val sideWidth=minOf(150.dp,maxWidth*0.28f)
+    Column(Modifier.align(Alignment.TopStart).offset(x=insets.left+8.dp,y=top).widthIn(max=sideWidth).heightIn(max=available).testTag("remote-params")
+        .clip(workspaceShape).background(scrim).verticalScroll(rememberScrollState()).padding(6.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
+        if(state.remote.settings.isEmpty()) Text("曝光参数请在机身调节",style=MaterialTheme.typography.bodySmall,color=Color.White.copy(alpha=.7f))
+        state.remote.settings.forEach { setting-> ParameterReadout(setting) { value->actions.onSetSetting(setting.key,value) } }
+    }
+    Column(Modifier.align(Alignment.TopEnd).offset(x=-(insets.right+8.dp),y=top).widthIn(max=sideWidth).heightIn(max=available).testTag("remote-controls")
+        .clip(workspaceShape).background(scrim).verticalScroll(rememberScrollState()).padding(6.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(12.dp)) {
+        FocusControl(state,actions); ShutterControl(state,actions); MovieControl(state,actions)
+    }
+}
+
+@Composable private fun ViewFinder(state:AppState,image:Bitmap?,grid:Boolean,modifier:Modifier) {
+    BoxWithConstraints(modifier) {
+        val aspect=image?.let { it.width.toFloat()/it.height } ?: (3f/2)
+        val rect=containRect(maxWidth.value,maxHeight.value,aspect)
+        Box(Modifier.offset(rect.left.dp,rect.top.dp).size(rect.width.dp,rect.height.dp).testTag("remote-viewfinder")) {
+            if(image!=null) Image(image.asImageBitmap(),"实时取景",Modifier.fillMaxSize(),contentScale=ContentScale.Fit)
+            else ViewfinderPlaceholder(state)
+            if(grid) Canvas(Modifier.matchParentSize().testTag("remote-grid")) {
+                val (xs,ys)=gridLines(FitRect(0f,0f,size.width,size.height))
+                xs.forEach { x->drawLine(Color.White.copy(alpha=.45f),Offset(x,0f),Offset(x,size.height),1f) }
+                ys.forEach { y->drawLine(Color.White.copy(alpha=.45f),Offset(0f,y),Offset(size.width,y),1f) }
+            }
+        }
+    }
+}
+
+@Composable private fun WorkspaceHeader(state:AppState,grid:Boolean,actions:RemoteActions,modifier:Modifier) {
+    Row(modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+        Row(Modifier.weight(1f).clip(workspaceShape).background(scrim).padding(2.dp),verticalAlignment=Alignment.CenterVertically) {
+            IconButton(onClick=actions.onBack) { Icon(Icons.Outlined.ArrowBack,"返回工作台",tint=Color.White) }
+            Column(Modifier.weight(1f).padding(end=8.dp)) {
+                Text(state.device?.displayName ?: if(state.connecting)"连接相机…" else "未连接",
+                    style=MaterialTheme.typography.labelLarge,color=Color.White,maxLines=1,overflow=TextOverflow.Ellipsis)
+                Text(statusText(state),style=MaterialTheme.typography.labelSmall,color=Color.White.copy(alpha=.7f),maxLines=1,overflow=TextOverflow.Ellipsis)
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Row(Modifier.clip(workspaceShape).background(scrim).padding(2.dp),verticalAlignment=Alignment.CenterVertically) {
+            IconToggleButton(checked=grid,onCheckedChange={actions.onToggleGrid()}) { Icon(Icons.Outlined.Grid3x3,"构图网格",tint=Color.White) }
+            IconButton(onClick=actions.onTools) { Icon(Icons.Outlined.Tune,"拍摄工具",tint=Color.White) }
+            val canDisconnect=!state.transferring&&!state.connecting
+            IconButton(onClick=actions.onDisconnect,enabled=canDisconnect) { Icon(Icons.Outlined.LinkOff,"断开相机",tint=if(canDisconnect)Color.White else Color.DarkGray) }
+        }
+    }
+}
+
+private fun statusText(state:AppState):String=when {
+    state.connected->state.remote.status.ifBlank { "已连接" }
+    state.connecting->"连接中…"
+    else->state.message
+}
+
+@Composable private fun BottomPanel(state:AppState,actions:RemoteActions,modifier:Modifier) {
+    Column(modifier.clip(workspaceShape).background(scrim).padding(8.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+            if(state.remote.settings.isEmpty()) Text("曝光参数请在机身调节",Modifier.padding(6.dp),style=MaterialTheme.typography.bodySmall,color=Color.White.copy(alpha=.7f))
+            state.remote.settings.forEach { setting-> ParameterReadout(setting) { value->actions.onSetSetting(setting.key,value) } }
+        }
+        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceEvenly) {
+            FocusControl(state,actions); ShutterControl(state,actions); MovieControl(state,actions)
+        }
+    }
+}
+
+@Composable private fun ViewfinderPlaceholder(state:AppState) {
+    Column(Modifier.fillMaxSize().testTag("remote-placeholder"),verticalArrangement=Arrangement.Center,horizontalAlignment=Alignment.CenterHorizontally) {
+        Icon(Icons.Outlined.Videocam,null,tint=Color(0xFF9AA0A6))
+        Text(when {
+            state.connecting->"连接中…"
+            "startLiveview" in state.remote.apis->"等待实时画面…"
+            else->"相机未开放实时取景"
+        },color=Color(0xFF9AA0A6),style=MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable private fun ParameterReadout(setting:Setting,onSelect:(String)->Unit) {
+    var open by remember { mutableStateOf(false) }
+    val writable=setting.writable&&setting.choices.isNotEmpty()
+    Box {
+        Column(Modifier.clip(workspaceShape).background(Color.White.copy(alpha=.08f))
+            .then(if(writable) Modifier.clickable { open=true } else Modifier).padding(horizontal=10.dp,vertical=6.dp)) {
+            Text(setting.label,style=MaterialTheme.typography.labelSmall,color=Color.White.copy(alpha=.6f),maxLines=1,overflow=TextOverflow.Ellipsis)
+            Row(verticalAlignment=Alignment.CenterVertically) {
+                Text(setting.display(setting.current),style=MaterialTheme.typography.titleSmall,fontWeight=FontWeight.Medium,color=Color.White,maxLines=1,overflow=TextOverflow.Ellipsis)
+                if(writable) Icon(Icons.Outlined.ExpandMore,null,Modifier.size(14.dp),tint=Color.White.copy(alpha=.7f))
+            }
+        }
+        DropdownMenu(expanded=open,onDismissRequest={open=false},modifier=Modifier.heightIn(max=350.dp)) {
+            setting.choices.forEach { value->DropdownMenuItem(text={Text(setting.display(value))},onClick={open=false;onSelect(value)}) }
+        }
+    }
+}
+
+@Composable private fun FocusControl(state:AppState,actions:RemoteActions) {
+    OutlinedButton(onClick=actions.onFocus,enabled=state.connected && "actHalfPressShutter" in state.remote.apis && "cancelHalfPressShutter" in state.remote.apis,
+        shape=workspaceShape,contentPadding=PaddingValues(horizontal=16.dp,vertical=10.dp)) { Text("AF") }
+}
+@Composable private fun ShutterControl(state:AppState,actions:RemoteActions) {
     val enabled=state.connected && "actTakePicture" in state.remote.apis && state.intervalRemaining==0
     Box(Modifier.size(72.dp).border(2.dp,if(enabled)Color.White else Color.DarkGray,CircleShape).padding(6.dp),contentAlignment=Alignment.Center) {
-        FilledIconButton(onClick=c::capture,enabled=enabled,modifier=Modifier.fillMaxSize(),shape=CircleShape,
+        FilledIconButton(onClick=actions.onCapture,enabled=enabled,modifier=Modifier.fillMaxSize(),shape=CircleShape,
             colors=IconButtonDefaults.filledIconButtonColors(containerColor=Color.White,contentColor=Color(0xFF202020))) {
             Icon(Icons.Outlined.CameraAlt,"拍照")
         }
     }
 }
-@Composable private fun MovieControl(state: AppState,c: CompanionController) {
+@Composable private fun MovieControl(state:AppState,actions:RemoteActions) {
     val recording=state.remote.status.contains("MovieRecording",true)
-    FilledTonalIconButton(onClick=c::movie,enabled=state.connected && (if(recording)"stopMovieRec" else "startMovieRec") in state.remote.apis,
-        modifier=Modifier.size(48.dp),shape=RoundedCornerShape(10.dp)) {
-        Icon(if(recording)Icons.Outlined.Stop else Icons.Outlined.Videocam,if(recording)"停止录像" else "开始录像",tint=if(recording)Color(0xFFFF6B63)else LocalContentColor.current)
+    FilledTonalIconButton(onClick=actions.onMovie,enabled=state.connected && (if(recording)"stopMovieRec" else "startMovieRec") in state.remote.apis,
+        modifier=Modifier.size(48.dp),shape=workspaceShape) {
+        Icon(if(recording)Icons.Outlined.Stop else Icons.Outlined.Videocam,if(recording)"停止录像" else "开始录像",tint=if(recording)Color(0xFFFF6B63) else LocalContentColor.current)
     }
 }
 
-@Composable private fun CaptureTools(state: AppState,c: CompanionController,onDismiss: ()->Unit,openWifi: ()->Unit) {
+@Composable private fun CaptureTools(state:AppState,c:CompanionController,onDismiss:()->Unit,openWifi:()->Unit) {
     var count by rememberSaveable { mutableStateOf("10") }
     var seconds by rememberSaveable { mutableStateOf("5") }
     AlertDialog(onDismissRequest=onDismiss,title={Text("拍摄工具")},text={
@@ -123,4 +227,42 @@ import io.github.ayatinene.sonycompanion.data.*
             TextButton(onClick=openWifi) { Text("Wi-Fi 设置") }
         }
     },confirmButton={TextButton(onClick=onDismiss) { Text("关闭") }})
+}
+
+/** Hides the system bars; an edge swipe reveals them transiently, exit restores the previous behavior. */
+@Composable private fun ImmersiveSystemBars() {
+    val view=LocalView.current
+    DisposableEffect(view) {
+        val window=view.context.findActivity()?.window
+        if(window==null) return@DisposableEffect onDispose { }
+        val controller=WindowCompat.getInsetsController(window,view)
+        val previous=controller.systemBarsBehavior
+        controller.systemBarsBehavior=WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        onDispose {
+            controller.show(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior=previous
+        }
+    }
+}
+
+/** Controls avoid the cutout and gesture areas, which stay meaningful while the bars are hidden. */
+@Composable fun rememberWorkspaceInsets():WorkspaceInsets {
+    val density=LocalDensity.current
+    val layoutDirection=LocalLayoutDirection.current
+    val cutout=WindowInsets.displayCutout
+    val gestures=WindowInsets.systemGestures
+    return with(density) {
+        WorkspaceInsets(
+            top=maxOf(cutout.getTop(this),gestures.getTop(this)).toDp(),
+            bottom=maxOf(cutout.getBottom(this),gestures.getBottom(this)).toDp(),
+            left=maxOf(cutout.getLeft(this,layoutDirection),gestures.getLeft(this,layoutDirection)).toDp(),
+            right=maxOf(cutout.getRight(this,layoutDirection),gestures.getRight(this,layoutDirection)).toDp())
+    }
+}
+
+private tailrec fun Context.findActivity():Activity?=when(this) {
+    is Activity->this
+    is ContextWrapper->baseContext.findActivity()
+    else->null
 }
