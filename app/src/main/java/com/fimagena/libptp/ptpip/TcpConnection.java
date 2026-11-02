@@ -42,7 +42,10 @@ public class TcpConnection {
     private BlockingQueue<PtpIpPacket> mPacketOutQueue;
 
     private void putBlocking(PtpIpPacket packet) {
-        while (!mIsClosed) {try {mPacketOutQueue.put(packet); return;} catch (InterruptedException e) {Thread.currentThread().interrupt(); return;}}
+        while (!mIsClosed) {
+            try {if (mPacketOutQueue.offer(packet, 100, java.util.concurrent.TimeUnit.MILLISECONDS)) return;}
+            catch (InterruptedException e) {Thread.currentThread().interrupt(); return;}
+        }
     }
 
 
@@ -62,7 +65,7 @@ public class TcpConnection {
                     packet = reader.next();
                     packet.setSourceConnection(TcpConnection.this);
                     mLastActivityTimestamp = System.currentTimeMillis();
-                    LOG.info("PTPIP: Packet in  <== " + packet.toString());
+                    LOG.info("PTPIP: Packet in  <== " + safeDescription(packet));
                     putBlocking(packet);
                 }
                 catch (IOException | PtpIpExceptions.MalformedPacket e) {
@@ -107,11 +110,21 @@ public class TcpConnection {
     }
 
     public void sendPacket(PtpIpPacket packet) throws IOException {
-        LOG.info("PTPIP: Packet out ==> " + packet.toString());
+        LOG.info("PTPIP: Packet out ==> " + safeDescription(packet));
         if ((mSocket == null) || (mSocket.isClosed()) || (!mSocket.isConnected())) throw new IOException();
         mOut.write(packet.serializePacket());
         mOut.flush();
         mLastActivityTimestamp = System.currentTimeMillis();
+    }
+
+    /** Init packets carry the host GUID / friendly name and Data/EndData carry payload bytes, so never render them. */
+    private static String safeDescription(PtpIpPacket packet) {
+        if ((packet instanceof PtpIpPacket.InitCommandRequest) || (packet instanceof PtpIpPacket.InitCommandAck)
+                || (packet instanceof PtpIpPacket.InitEventRequest) || (packet instanceof PtpIpPacket.InitEventAck)
+                || (packet instanceof PtpIpPacket.InitFail)
+                || (packet instanceof PtpIpPacket.Data) || (packet instanceof PtpIpPacket.EndData))
+            return packet.getClass().getSimpleName() + "[payload omitted]";
+        return packet.toString();
     }
 
     public void close() {

@@ -34,9 +34,11 @@ Sony α7R II（ILCE-7RM2）的三种无线工作模式分别对应不同的机�
 
 [A7R II 官方 Send to Computer 指南](https://helpguide.sony.net/ilc/1520/v1/en/contents/TP0001087161.html)要求无线接入点环境以及预先向相机登记接收端，不同于手机直连相机热点。
 
-1. 在 TCP 15740 建立 command 与 event 两条连接，发送已登记的 16 字节 GUID 和 UTF-16 主机名完成初始化，随后执行 `GetDeviceInfo`、`OpenSession`、`GetStorageIDs`、带三参数的 `GetObjectHandles`、`GetObjectInfo`、`GetThumb`、`GetObject`。
-2. 参考 `airmtp` 的 Sony 开始命令：当 `OperationsSupported` 同时声明支持 `0x9280` 和 `0x9281` 时，先发 `0x9280`（参数 4，21 字节小端负载 `2, 2, 0, 0, 0x00020001` 加尾字节 0），随后必须发 `0x9281`（参数 4）读取确认，否则后续请求会持续 busy。不主动发送未知的结束或休眠命令。
-3. `libptp` 读取层将大文件数据包按 64 KiB 分块流式写出，写入 MediaStore 时核对总长度，失败则清理未完成文件。
+1. 在 TCP 15740 建立 command 与 event 两条连接，发送已登记的 16 字节 GUID 和 UTF-16 主机名完成初始化，随后执行 `OpenSession`、`GetDeviceInfo`、`GetStorageIDs`、带三参数的 `GetObjectHandles`、`GetObjectInfo`、`GetThumb`、`GetObject`。
+2. `OpenSession` 若遇到相机端仍保持旧会话并返回 `SessionAlreadyOpen`（`0x201E`，按规范携带 1 个 `SessionID` 参数），解析层会校验该参数并将其作为明确的 `OperationFailed` 抛出（不误判为协议格式损坏，也不伪装成打开成功），提示在机身退出并重新进入“发送到电脑”。
+3. 参考 `airmtp` 的 Sony 开始命令：当 `OperationsSupported` 同时声明支持 `0x9280` 和 `0x9281` 时，先发 `0x9280`（参数 4，21 字节小端负载 `2, 2, 0, 0, 0x00020001` 加尾字节 0），随后必须发 `0x9281`（参数 4）读取确认，否则后续请求会持续 busy。不主动发送未知的结束或休眠命令。
+4. 同一 PTP/IP 会话严格保持单会话、单在途事务串行执行（不做多请求并发或字节级断点续传）：连接建立后先拉取全部存储卡与句柄总数，再逐个句柄执行 `GetObjectInfo` 并分批发布平铺文件快照；下载事务在两个扫描事务之间优先抢占，缩略图与预览在事务间隙公平穿插，不会向正在传输的数据流中穿插命令。
+5. `libptp` 读取层将大文件数据包按 64 KiB 分块流式写出，写入 MediaStore 时核对总长度，失败则清理未完成文件。
 
 ## 参考项目与固定提交
 

@@ -32,6 +32,11 @@ data class CameraFile(val id: String, val name: String, val resources: List<Reso
     val size: Long = 0, val raw: Boolean = false, val handle: Long? = null, val parent: String = "") {
     fun bestResource(): Resource? = jpegResource()
 }
+/** A queued COMPUTER file must uniquely match the current authoritative listing; a stale capture with
+ * the same id but different metadata (size/date/parent/name) is never enqueued. */
+fun matchCurrentFile(candidate: CameraFile, current: List<CameraFile>): CameraFile? = current.filter {
+    it.id==candidate.id && it.parent==candidate.parent && it.name==candidate.name && it.date==candidate.date && it.size==candidate.size
+}.singleOrNull()
 data class LocalPhoto(val uri: String, val name: String, val bytes: Long, val added: Long,
     val origin: String, val sourceId: String, val pairKey: String = localPairKey(name,sourceId))
 fun pairKey(name: String) = name.substringBeforeLast('.').uppercase(Locale.ROOT)
@@ -42,6 +47,12 @@ fun localPairKey(name: String, source: String): String {
 }
 data class QueueItem(val file: CameraFile, val state: String = "等待", val received: Long = 0,
     val total: Long = file.size, val error: String? = null)
+enum class ScanPhase { Idle, Scanning, Done, Failed }
+/** Progress of the COMPUTER (PTP) listing scan. `paused` is true while the scan is held back, either
+ * by the user or by an in-flight download; the user's explicit pause is never lifted by a download
+ * finishing. */
+data class ScanState(val phase: ScanPhase = ScanPhase.Idle, val scanned: Int = 0, val total: Int? = null,
+    val found: Int = 0, val paused: Boolean = false, val error: String? = null)
 data class AppState(val mode: CameraMode? = null, val connected: Boolean = false,
     // `connecting` is owned by CompanionController.connect; `busy` is shared by browsing/USB/transfers and
     // is not a connection signal.
@@ -50,4 +61,5 @@ data class AppState(val mode: CameraMode? = null, val connected: Boolean = false
     val device: Device? = null, val remote: RemoteState = RemoteState(),
     val files: List<CameraFile> = emptyList(), val folder: String = "", val queue: List<QueueItem> = emptyList(),
     val transferring: Boolean = false, val local: List<LocalPhoto> = emptyList(), val logs: List<String> = emptyList(),
-    val intervalRemaining: Int = 0, val queueScope: String? = null, val queueNotice: String = "")
+    val intervalRemaining: Int = 0, val queueScope: String? = null, val queueNotice: String = "",
+    val scan: ScanState = ScanState(), val sessionGeneration: Long = 0)

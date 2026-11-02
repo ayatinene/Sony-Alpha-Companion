@@ -21,6 +21,8 @@ package com.fimagena.libptp.ptpip;
 
 import com.fimagena.libptp.PtpDataType;
 import com.fimagena.libptp.PtpExceptions;
+import com.fimagena.libptp.PtpLogObserver;
+import com.fimagena.libptp.PtpLogRecord;
 import com.fimagena.libptp.PtpOperation;
 import com.fimagena.libptp.PtpEvent;
 import com.fimagena.libptp.PtpTransport;
@@ -100,21 +102,61 @@ public class PtpIpConnection extends PtpTransport {
 
     private PtpIpSession mSingleSession;
 
-    private PtpIpPacketListener mPtpIpPacketListener;
+    private volatile PtpIpPacketListener mPtpIpPacketListener;
+
+    // Close/failure bookkeeping. mClosed guarantees close() is idempotent; mTerminalCause
+    // remembers the first terminal cause (original transport failure or close reason) so a later
+    // generic close can never mask it. Valid packets already queued are never discarded.
+    private final Object mCloseLock = new Object();
+    private volatile boolean mClosed = false;
+    private volatile Exception mTerminalCause;
+
+    private volatile PtpLogObserver mLogObserver;
+
+    /** Attach an optional simple log observer. Safe to call at any time; null detaches. */
+    public void setLogObserver(PtpLogObserver observer) {mLogObserver = observer;}
+
+    /** First terminal cause recorded for this connection, or null while it is healthy. */
+    Exception getTerminalCause() {return mTerminalCause;}
+
+    /** Record the first terminal cause; returns the effective (first-wins) cause. */
+    private Exception recordTerminal(Exception cause) {
+        synchronized (mCloseLock) {
+            if (mTerminalCause == null) mTerminalCause = cause;
+            return mTerminalCause;
+        }
+    }
+
+    /** Route one structured record to the observer. Never lets an observer failure break the protocol. */
+    void log(PtpLogRecord record) {
+        PtpLogObserver observer = mLogObserver;
+        if ((observer == null) || (record == null)) return;
+        try {observer.report(record.level, record.toString(), record.error);}
+        catch (Throwable ignored) { /* logging must never break the protocol */ }
+    }
 
     private class PtpIpPacketListener extends Thread {
 
         private void putBlocking(BlockingQueue<PtpIpPacket> queue, PtpIpPacket packet) {
-            while (true) {try {queue.put(packet); return;} catch (InterruptedException e) {}}
+            while (!mClosed) {
+                try {if (queue.offer(packet, 100, TimeUnit.MILLISECONDS)) return;}
+                catch (InterruptedException e) {Thread.currentThread().interrupt(); return;}
+            }
         }
 
         private void putFirstBlocking(BlockingDeque<PtpIpPacket> queue, PtpIpPacket packet) {
-            while (true) {try {queue.putFirst(packet); return;} catch (InterruptedException e) {}}
+            while (!mClosed) {
+                try {if (queue.offerFirst(packet, 100, TimeUnit.MILLISECONDS)) return;}
+                catch (InterruptedException e) {Thread.currentThread().interrupt(); return;}
+            }
         }
 
         private void putEvent(PtpEvent event) {
             if (mEventOutQueue == null) return;
-            while (true) {try {mEventOutQueue.put(event); return;} catch (InterruptedException e) {}}
+            while (!mClosed) {
+                try {if (mEventOutQueue.offer(event, 100, TimeUnit.MILLISECONDS)) return;}
+                catch (InterruptedException e) {Thread.currentThread().interrupt(); return;}
+            }
         }
 
         public void run() {
@@ -147,15 +189,9 @@ public class PtpIpConnection extends PtpTransport {
 
                 // if Error --> something happened, let's close down and tell everybody
                 else if (packet instanceof PtpIpPacket.Error) {
-                    // close downward stack
-                    close();
-
-                    mSingleSession.setOpened(false);
-
-                    // tell upward stack
-                    putBlocking(mInitPacketOutQueue, packet);
-                    putBlocking(mTransactionPacketOutQueue, packet);
-                    putEvent(new PtpEvent.Error(((PtpIpPacket.Error) packet).mException));
+                    // Preserve the original transport exception as the first failure delivered
+                    // to every waiter (init and transaction) instead of a generic close reason.
+                    failConnection(((PtpIpPacket.Error) packet).mException);
                 }
 
                 // ---------------------------------------------------------------------------------
@@ -238,17 +274,55 @@ public class PtpIpConnection extends PtpTransport {
     @Override public PtpTransport.Session openSession() throws TransportDataError, TransportIOError, TransportOperationFailed, PtpExceptions.PtpProtocolViolation {
         if (mSingleSession.isOpened()) {
             PtpIpConnection connection = new PtpIpConnection(mEventOutQueue);
+            connection.setLogObserver(mLogObserver);
             connection.connect(mAddress, mHostId);
             return connection.openSession();
             //FIXME: add'l connection is never properly closed - no reference is being held
         }
 
+        long start = System.currentTimeMillis();
         PtpOperation.Request request = PtpOperation.createRequest(PtpOperation.OPSCODE_OpenSession);
         request.setParameters(new long[]{SESSION_ID});
         PtpOperation.Response response = mSingleSession.executeNullTransaction(request);
+        long responseCode = response.getResponseCode();
+
+        // Known PTP/IP spec special case: SessionAlreadyOpen is the only response that
+        // carries a single SessionID parameter. It is still a failure (the camera holds a
+        // live session), never a success, and must surface the response code + SessionID.
+        if (responseCode == PtpOperation.RSPCODE_SessionAlreadyOpen) {
+            long[] responseParameters = response.getParameters();
+            if ((responseParameters == null) || (responseParameters.length != 1)) {
+                throw new PtpIpExceptions.ProtocolViolation(
+                        "SessionAlreadyOpen (0x201E) response must carry exactly one SessionID parameter!");
+            }
+            log(PtpLogRecord.builder(PtpLogRecord.Level.WARN, "TRANSACTION")
+                    .message("OpenSession refused: camera session still open")
+                    .operationCode(PtpOperation.OPSCODE_OpenSession)
+                    .responseCode(responseCode)
+                    .parameters(responseParameters)
+                    .durationMillis(System.currentTimeMillis() - start)
+                    .build());
+            throw new PtpIpExceptions.OperationFailed("OpenSession", responseCode, responseParameters);
+        }
+
         response.validate();
-        if (!response.isSuccess()) throw new PtpIpExceptions.OperationFailed("OpenSession", response.getResponseCode());
+        if (!response.isSuccess()) {
+            log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, "TRANSACTION")
+                    .message("OpenSession failed")
+                    .operationCode(PtpOperation.OPSCODE_OpenSession)
+                    .responseCode(responseCode)
+                    .durationMillis(System.currentTimeMillis() - start)
+                    .build());
+            throw new PtpIpExceptions.OperationFailed("OpenSession", responseCode);
+        }
         mSingleSession.setOpened(true);
+
+        log(PtpLogRecord.builder(PtpLogRecord.Level.INFO, "TRANSACTION")
+                .message("OpenSession succeeded")
+                .operationCode(PtpOperation.OPSCODE_OpenSession)
+                .responseCode(responseCode)
+                .durationMillis(System.currentTimeMillis() - start)
+                .build());
 
         return mSingleSession;
     }
@@ -256,23 +330,63 @@ public class PtpIpConnection extends PtpTransport {
     protected void sendCommandChannelPacket(PtpIpPacket packet) throws IOException {mCommandConnection.sendPacket(packet);}
     protected void sendEventChannelPacket(PtpIpPacket.Event packet) throws IOException {mEventConnection.sendPacket(packet);}
 
-    private PtpIpPacket.InitPacket connectChannel(TcpConnection tcpConnection, InetSocketAddress address, PtpIpPacket.InitPacket initPacket, Class expectedAnswer)
+    private PtpIpPacket.InitPacket connectChannel(String channelName, TcpConnection tcpConnection, InetSocketAddress address, PtpIpPacket.InitPacket initPacket, Class expectedAnswer)
             throws PtpIpExceptions.IOError, PtpIpExceptions.MalformedPacket, PtpIpExceptions.ProtocolViolation, PtpIpExceptions.OperationFailed {
+        long start = System.currentTimeMillis();
         try {
             tcpConnection.connect(address);
             tcpConnection.sendPacket(initPacket);
         }
-        catch (IOException e) {close(); throw new PtpIpExceptions.IOError("Could not connect channel!", e);}
+        catch (IOException e) {
+            close();
+            log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, channelName)
+                    .message("Channel connect failed")
+                    .durationMillis(System.currentTimeMillis() - start)
+                    .error(e).build());
+            throw new PtpIpExceptions.IOError("Could not connect channel!", e);
+        }
 
-        // takeBlocking
+        // takeBlocking; a concurrent terminal (close/failure) surfaces its original cause instead
+        // of a fabricated timeout, but only once any already-queued init packet was consumed.
+        Exception terminal = mTerminalCause;
+        if ((terminal != null) && mInitPacketOutQueue.isEmpty()) PtpIpExceptions.throwTerminal(terminal);
         PtpIpPacket packet = null;
         try {packet = mInitPacketOutQueue.poll(10, TimeUnit.SECONDS);} catch (InterruptedException e) {Thread.currentThread().interrupt(); throw new PtpIpExceptions.IOError(new IOException("PTP init interrupted"));}
-        if (packet == null) throw new PtpIpExceptions.IOError(new java.net.SocketTimeoutException("PTP init timed out"));
+        if (packet == null) {
+            terminal = mTerminalCause;
+            if (terminal != null) PtpIpExceptions.throwTerminal(terminal);
+            PtpIpExceptions.IOError timeout = new PtpIpExceptions.IOError(new java.net.SocketTimeoutException("PTP init timed out"));
+            log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, channelName)
+                    .message("Channel init timed out")
+                    .durationMillis(System.currentTimeMillis() - start)
+                    .error(timeout).build());
+            throw timeout;
+        }
 
-        if (packet instanceof PtpIpPacket.InitFail)
-            throw new PtpIpExceptions.OperationFailed("InitRequest", ((PtpIpPacket.InitFail) packet).mReason);
-        PtpIpExceptions.testError(packet);
-        PtpIpExceptions.testType(packet, expectedAnswer);
+        if (packet instanceof PtpIpPacket.InitFail) {
+            PtpIpExceptions.OperationFailed failed = new PtpIpExceptions.OperationFailed("InitRequest", ((PtpIpPacket.InitFail) packet).mReason);
+            log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, channelName)
+                    .message("Channel init refused by responder")
+                    .durationMillis(System.currentTimeMillis() - start)
+                    .error(failed).build());
+            throw failed;
+        }
+        try {
+            PtpIpExceptions.testError(packet);
+            PtpIpExceptions.testType(packet, expectedAnswer);
+        }
+        catch (PtpIpExceptions.IOError | PtpIpExceptions.MalformedPacket | PtpIpExceptions.ProtocolViolation e) {
+            log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, channelName)
+                    .message("Channel init failed")
+                    .durationMillis(System.currentTimeMillis() - start)
+                    .error(e).build());
+            throw e;
+        }
+
+        log(PtpLogRecord.builder(PtpLogRecord.Level.INFO, channelName)
+                .message("Channel initialized")
+                .durationMillis(System.currentTimeMillis() - start)
+                .build());
 
         return (PtpIpPacket.InitPacket) packet;
     }
@@ -289,32 +403,105 @@ public class PtpIpConnection extends PtpTransport {
         // -----------------------------------------------------------------------------------------
         // Open command and event channel
 
+        long start = System.currentTimeMillis();
         try {
-            PtpIpPacket.InitPacket initAck = connectChannel(mCommandConnection, mAddress.mTcpAddress, new PtpIpPacket.InitCommandRequest(mHostId), PtpIpPacket.InitCommandAck.class);
+            PtpIpPacket.InitPacket initAck = connectChannel("INIT_COMMAND", mCommandConnection, mAddress.mTcpAddress, new PtpIpPacket.InitCommandRequest(mHostId), PtpIpPacket.InitCommandAck.class);
             long mConnectionNumber = ((PtpIpPacket.InitCommandAck) initAck).mConnectionNumber;
-            connectChannel(mEventConnection, mAddress.mTcpAddress, new PtpIpPacket.InitEventRequest(mConnectionNumber), PtpIpPacket.InitEventAck.class);
+            connectChannel("INIT_EVENT", mEventConnection, mAddress.mTcpAddress, new PtpIpPacket.InitEventRequest(mConnectionNumber), PtpIpPacket.InitEventAck.class);
         }
         catch (PtpIpExceptions.IOError | PtpIpExceptions.MalformedPacket | PtpIpExceptions.ProtocolViolation e) {
             close();
+            log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, "CONNECT")
+                    .message("Connect failed")
+                    .durationMillis(System.currentTimeMillis() - start)
+                    .error(e).build());
             throw e;
         }
-        mStatus = ConnectionStatus.CONNECTED;
+        // Atomically commit success or detect a concurrent close: the mClosed check and the
+        // mStatus transition share mCloseLock, so a close() interleaving can never be undone by a
+        // late "CONNECTED" write.
+        boolean aborted;
+        synchronized (mCloseLock) {
+            aborted = mClosed;
+            if (!aborted) mStatus = ConnectionStatus.CONNECTED;
+        }
+        if (aborted) {
+            IOException closeCause = new IOException("Connection closed during connect", mTerminalCause);
+            PtpIpExceptions.IOError error = new PtpIpExceptions.IOError(closeCause);
+            log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, "CONNECT")
+                    .message("Connect aborted by concurrent close")
+                    .durationMillis(System.currentTimeMillis() - start)
+                    .error(error).build());
+            throw error;
+        }
+
+        log(PtpLogRecord.builder(PtpLogRecord.Level.INFO, "CONNECT")
+                .message("Connected")
+                .durationMillis(System.currentTimeMillis() - start)
+                .build());
     }
 
 
     @Override public boolean isClosed() {return mStatus == ConnectionStatus.CLOSED;}
 
-    public void close() {
-        // stop listening
-        mStatus = ConnectionStatus.CLOSED;
-        if (mPtpIpPacketListener != null) mPtpIpPacketListener.interrupt();
-
+    /**
+     * Idempotent teardown. Returns true only for the call that actually performed the
+     * teardown, so repeated/concurrent close() calls never re-deliver or re-close.
+     */
+    private boolean teardown() {
+        PtpIpPacketListener listener;
+        synchronized (mCloseLock) {
+            if (mClosed) return false;
+            mClosed = true;
+            mStatus = ConnectionStatus.CLOSED;
+            listener = mPtpIpPacketListener;
+        }
+        if (listener != null) listener.interrupt();
         mSingleSession.setOpened(false);
-
-        // shutdown TCP connections without further noise
         mEventConnection.close();
         mCommandConnection.close();
-        mInitPacketOutQueue.offer(new PtpIpPacket.Error(new IOException("Connection closed")));
-        mTransactionPacketOutQueue.offer(new PtpIpPacket.Error(new IOException("Connection closed")));
+        return true;
+    }
+
+    /**
+     * Wake every init/transaction waiter with the given terminal cause without discarding valid
+     * packets that are already queued: the terminal marker is appended at the <em>tail</em>, so a
+     * completed last response (EndData + OperationResponse OK) still wins. Delivery is
+     * non-blocking, so a full bounded queue can never deadlock the caller; a waiter that drains the
+     * queue and finds it empty falls back to {@link #getTerminalCause()}.
+     */
+    private void wakeWaiters(Exception cause) {
+        PtpIpPacket error = new PtpIpPacket.Error(cause);
+        mInitPacketOutQueue.offer(error);
+        mTransactionPacketOutQueue.offerLast(error);
+        // Non-blocking: an error event must never stall the listener on a full queue.
+        if (mEventOutQueue != null) mEventOutQueue.offer(new PtpEvent.Error(cause));
+    }
+
+    /**
+     * Called by the packet listener when the transport reports a genuine failure. The original
+     * exception is remembered (first failure wins) and delivered after any already-queued valid
+     * packets; a later close() cannot mask it with a generic "Connection closed".
+     */
+    private void failConnection(Exception cause) {
+        Exception effective = recordTerminal(cause);
+        teardown();
+        wakeWaiters(effective);
+        log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, "TRANSPORT")
+                .message("Connection failed")
+                .error(effective).build());
+    }
+
+    public void close() {
+        // Record a close reason first (never overwriting a genuine failure), so waiters that drain
+        // the queue still get a cause even if the terminal marker could not be enqueued.
+        Exception cause = recordTerminal(new IOException("Connection closed"));
+        if (!teardown()) return; // repeated / concurrent close is a no-op
+
+        wakeWaiters(cause);
+
+        log(PtpLogRecord.builder(PtpLogRecord.Level.INFO, "CLOSE")
+                .message("Connection closed")
+                .build());
     }
 }

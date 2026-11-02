@@ -21,6 +21,7 @@ package com.fimagena.libptp.ptpip;
 
 import com.fimagena.libptp.PtpEvent;
 import com.fimagena.libptp.PtpExceptions;
+import com.fimagena.libptp.PtpLogRecord;
 import com.fimagena.libptp.PtpOperation;
 import com.fimagena.libptp.PtpTransport;
 
@@ -82,10 +83,22 @@ public class PtpIpSession implements PtpTransport.Session {
         if (!mIsOpened && (transactionId != 0))
             throw new PtpIpExceptions.ProtocolViolation("Cannot execute transactions without opening session first!");
 
+        long start = System.currentTimeMillis();
+        mPtpIpConnection.log(PtpLogRecord.builder(PtpLogRecord.Level.DEBUG, "TRANSACTION")
+                .message("Request out")
+                .operationCode(request.getOperationCode())
+                .transactionId(transactionId)
+                .parameters(request.getParameters())
+                .build());
+
+        try {
+
         // -------------------------------------------------------------------------------------
         // Send OperationRequest (+ data if required)
 
-        LOG.info("PTP: Request out: ==> " + request.toString());
+        // Log metadata only: request/response data objects may carry payload bytes.
+        LOG.info("PTP: Request out: ==> [OpsCode: " + String.format("0x%04x", request.getOperationCode())
+                + ", Params: " + request.getParameters().length + "]");
 
         PtpIpPacket.OperationRequest requestPacket = new PtpIpPacket.OperationRequest(request.hasData(), request.getOperationCode(), transactionId, request.getParameters());
         try {
@@ -110,10 +123,20 @@ public class PtpIpSession implements PtpTransport.Session {
         PtpOperation.Response response = PtpOperation.createResponse(request);
 
         while (status != TransactionStatus.RESPONSE_RECEIVED) {
+            // Preserve FIFO: only surface a terminal cause once every already-queued valid packet
+            // has been consumed, so a completed last response (EndData + OK) still wins.
+            Exception terminal = mPtpIpConnection.getTerminalCause();
+            if ((terminal != null) && mTransactionPacketInQueue.isEmpty())
+                PtpIpExceptions.throwTerminal(terminal);
+
             // takeBlocking
             PtpIpPacket packet = null;
             try {packet = mTransactionPacketInQueue.poll(65, java.util.concurrent.TimeUnit.SECONDS);} catch (InterruptedException e) {Thread.currentThread().interrupt(); throw new PtpIpExceptions.IOError(new IOException("PTP transaction interrupted"));}
-            if (packet == null) throw new PtpIpExceptions.IOError(new java.net.SocketTimeoutException("PTP transaction timed out"));
+            if (packet == null) {
+                terminal = mPtpIpConnection.getTerminalCause();
+                if (terminal != null) PtpIpExceptions.throwTerminal(terminal);
+                throw new PtpIpExceptions.IOError(new java.net.SocketTimeoutException("PTP transaction timed out"));
+            }
 
             // if Error --> throw Exception
             PtpIpExceptions.testError(packet);
@@ -202,9 +225,30 @@ public class PtpIpSession implements PtpTransport.Session {
             }
         }
 
-        LOG.info("PTP: Response in: <== " + response.toString());
+        LOG.info("PTP: Response in: <== [RspCode: " + String.format("0x%04x", response.getResponseCode())
+                + ", Params: " + response.getParameters().length + "]");
+
+        mPtpIpConnection.log(PtpLogRecord.builder(PtpLogRecord.Level.INFO, "TRANSACTION")
+                .message("Response in")
+                .operationCode(request.getOperationCode())
+                .transactionId(transactionId)
+                .responseCode(response.getResponseCode())
+                .parameters(response.getParameters())
+                .durationMillis(System.currentTimeMillis() - start)
+                .build());
 
         return response;
+
+        } catch (PtpIpExceptions.MalformedPacket | PtpIpExceptions.ProtocolViolation
+                 | PtpTransport.TransportIOError | PtpIpExceptions.OperationFailed e) {
+            mPtpIpConnection.log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, "TRANSACTION")
+                    .message("Transaction failed")
+                    .operationCode(request.getOperationCode())
+                    .transactionId(transactionId)
+                    .durationMillis(System.currentTimeMillis() - start)
+                    .error(e).build());
+            throw e;
+        }
     }
 
     @Override public void close() throws PtpTransport.TransportDataError, PtpTransport.TransportIOError, PtpTransport.TransportOperationFailed, PtpExceptions.PtpProtocolViolation {

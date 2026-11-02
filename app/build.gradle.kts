@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.ayatinene.sonycompanion"
         minSdk = 29
         targetSdk = 36
-        versionCode = 10
-        versionName = "0.1.9-preview"
+        versionCode = 11
+        versionName = "0.1.10-preview"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     if (signingPath != null) {

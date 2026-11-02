@@ -29,12 +29,27 @@ public class PtpIpExceptions {
     // ---------------------------------------------------------------------------------------------
     // Assert functions
 
-    public static void testError(PtpIpPacket packet) throws IOError, MalformedPacket {
+    public static void testError(PtpIpPacket packet) throws IOError, MalformedPacket, ProtocolViolation {
         if (packet instanceof PtpIpPacket.Error) {
             Exception e = ((PtpIpPacket.Error)packet).mException;
+            // Preserve the original exception type (and its cause chain) so callers
+            // can tell a genuine socket/EOF failure apart from a protocol violation.
+            if (e instanceof IOError) throw (IOError) e;
+            if (e instanceof ProtocolViolation) throw (ProtocolViolation) e;
+            if (e instanceof MalformedPacket) throw (MalformedPacket) e;
             if (e instanceof IOException) throw new IOError((IOException) e);
-            else throw (MalformedPacket) e;
+            throw new MalformedPacket("Unexpected internal error: " + e, e);
         }
+    }
+
+    /**
+     * Surface a remembered terminal connection cause (original transport failure or close reason)
+     * as the appropriate checked exception, preserving its type and cause chain.
+     */
+    public static void throwTerminal(Exception terminal) throws IOError, MalformedPacket, ProtocolViolation {
+        testError(new PtpIpPacket.Error(terminal));
+        // testError always throws for an Error packet; defensive fallback for the compiler.
+        throw new IOError(new IOException("Connection failed", terminal));
     }
 
     public static void testType(PtpIpPacket packet, Class expectedClass) throws ProtocolViolation {
@@ -52,14 +67,29 @@ public class PtpIpExceptions {
     }
 
     public static class OperationFailed extends PtpTransport.TransportOperationFailed {
-        public OperationFailed(String s, long responseCode) {super("Responder failed on " + s + " (Response: " + String.format("0x%08x", responseCode) + ")!");}
+        private final long mResponseCode;
+        private final long[] mResponseParameters;
+
+        public OperationFailed(String s, long responseCode) {this(s, responseCode, new long[0]);}
+        public OperationFailed(String s, long responseCode, long[] responseParameters) {
+            super("Responder failed on " + s + " (Response: " + String.format("0x%08x", responseCode) + ")!");
+            mResponseCode = responseCode;
+            mResponseParameters = responseParameters == null ? new long[0] : responseParameters.clone();
+        }
+
+        /** Response code that caused the failure (e.g. 0x201E SessionAlreadyOpen). */
+        public long getResponseCode() {return mResponseCode;}
+        /** Response parameters received with the failing response (e.g. the SessionID). */
+        public long[] getResponseParameters() {return mResponseParameters.clone();}
     }
 
     public static class ProtocolViolation extends PtpTransport.TransportDataError {
         public ProtocolViolation(String s) {super(s);}
+        public ProtocolViolation(String s, Throwable cause) {super(s, cause);}
     }
 
     public static class MalformedPacket extends PtpTransport.TransportDataError {
         public MalformedPacket(String s) {super(s);}
+        public MalformedPacket(String s, Throwable cause) {super(s, cause);}
     }
 }

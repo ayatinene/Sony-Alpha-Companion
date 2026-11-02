@@ -6,7 +6,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
-import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.shape.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
@@ -15,20 +14,16 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.*
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.ayatinene.sonycompanion.data.*
 import io.github.ayatinene.sonycompanion.BuildConfig
 import kotlinx.coroutines.*
-import java.util.Locale
 
 private val shape=RoundedCornerShape(10.dp)
 private val ShellNavSaver=listSaver<ShellNav,Any>(
@@ -92,7 +87,7 @@ private fun connectionSubtitle(state:AppState):String=when {
                         Destination.Home,Destination.Capture->Home(state,controller,
                             onOpenWorkspace={ nav=nav.copy(destination=workspaceFor(state.mode),entryTarget=null) },
                             onConnect={ mode->if(controller.connect(mode)) nav=nav.requestConnection(mode) },permissions=requestPermissions)
-                        Destination.Gallery->CameraGallery(state,controller)
+                        Destination.Gallery->CameraGallery(state,controller.galleryActions())
                         Destination.Local->LocalLibraryScreen(state,controller)
                         Destination.Settings->SettingsPage(state,controller,theme,dynamic,{theme=it;controller.prefs.edit().putString("theme",it).apply()}, {dynamic=it;controller.prefs.edit().putBoolean("dynamic",it).apply()},requestPermissions)
                     }
@@ -139,6 +134,10 @@ private fun connectionSubtitle(state:AppState):String=when {
                 Text(when { state.connected->"已连接"; state.connecting->"连接中"; else->"等待连接" },fontWeight=FontWeight.Medium)
             }
             Text(state.message,style=MaterialTheme.typography.bodyMedium)
+            (state.error ?: state.scan.error?.takeIf { it.isNotBlank() })?.let {
+                Text(it,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
+            }
+            if(state.scan.phase==ScanPhase.Scanning) Text("已发现 ${state.scan.found} 个文件",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
             if(state.queueNotice.isNotBlank()) Text(state.queueNotice,style=MaterialTheme.typography.bodySmall)
             state.device?.let { device ->
                 Text(device.displayName+device.identity.firmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.labelLarge)
@@ -147,122 +146,6 @@ private fun connectionSubtitle(state:AppState):String=when {
             if(!state.connected) Text("先在相机选择工作模式，再连接对应的 Wi-Fi。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
-}
-
-@Composable private fun CameraGallery(state:AppState,c:CompanionController) {
-    var selected by remember(state.queueScope,state.folder) { mutableStateOf(setOf<String>()) }
-    var detail by remember(state.queueScope,state.folder) { mutableStateOf<CameraFile?>(null) }
-    var preview by remember(state.queueScope,state.folder) { mutableStateOf<String?>(null) }
-    var filter by rememberSaveable { mutableStateOf("全部") }
-    var descending by rememberSaveable { mutableStateOf(true) }
-    var sizeChoice by rememberSaveable { mutableStateOf(JpegSize.MAXIMUM.name) }
-    val offeredSizes=JpegSize.entries.filter { choice -> state.files.any { !it.container && it.jpegResource(choice)!=null } }
-    val selectedSize=offeredSizes.firstOrNull { it.name==sizeChoice } ?: JpegSize.MAXIMUM
-    val selectedFiles=state.files.filter { it.id in selected && !it.container }
-    val unsupported=if(state.mode==CameraMode.JPEG) selectedFiles.count { it.jpegResource(selectedSize)==null } else 0
-    if(!state.connected||state.mode==CameraMode.REMOTE) { EmptyState(Icons.Outlined.SdCard,"相机图库","从首页连接 JPEG 传输，或已完成登记的 RAW / 原文件模式。");return }
-    val files=state.files.filter { it.container||filter=="全部"||(filter=="ARW"&&it.raw)||(filter=="JPEG"&&!it.raw) }
-        .let { list->if(descending) list.sortedWith(compareByDescending<CameraFile>{it.container}.thenByDescending{it.date}.thenByDescending{it.name}) else list.sortedWith(compareByDescending<CameraFile>{it.container}.thenBy{it.date}.thenBy{it.name}) }
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically) {
-            if(state.mode==CameraMode.JPEG) IconButton(onClick=c::root,enabled=!state.busy&&!state.transferring){Icon(Icons.Outlined.FolderOpen,"返回根目录")}
-            Text("相机图库",Modifier.weight(1f),style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
-            IconButton(onClick={descending=!descending}) { Icon(Icons.Outlined.Sort,"切换排序") }
-            if(selected.isNotEmpty()) TextButton(onClick={selected=emptySet()}) { Text("取消选择") }
-            TextButton(onClick={selected=if(selected.size==files.count{!it.container})emptySet() else files.filter{!it.container}.map{it.id}.toSet()}){Text("全选")}
-        }
-        Row(Modifier.padding(horizontal=16.dp),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-            listOf("全部","JPEG","ARW").filter { state.mode==CameraMode.COMPUTER || it!="ARW" }.forEach { name-> FilterChip(selected=filter==name,onClick={filter=name},label={Text(name)}) }
-            if(state.mode==CameraMode.JPEG) {
-                var menu by remember { mutableStateOf(false) }
-                Box { TextButton(onClick={menu=true},enabled=offeredSizes.isNotEmpty()){Text(selectedSize.title)}; DropdownMenu(menu,{menu=false}) {
-                    offeredSizes.forEach { size->DropdownMenuItem(text={Text(size.title)},onClick={sizeChoice=size.name;menu=false}) }
-                } }
-            }
-        }
-        if(state.mode==CameraMode.JPEG) Text("仅下载相机实际提供的 JPEG 尺寸。ARW 条目的 JPEG 是预览。",Modifier.padding(horizontal=16.dp,vertical=4.dp),style=MaterialTheme.typography.bodySmall)
-        if(files.isEmpty()) Box(Modifier.weight(1f)){EmptyState(Icons.Outlined.Image,"没有可显示的文件","可返回根目录，或在相机选择需要发送的照片。")}
-        else LazyVerticalGrid(GridCells.Adaptive(120.dp),Modifier.weight(1f),contentPadding=PaddingValues(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            items(files,key={it.id}) { file->
-                val bitmap by produceState<android.graphics.Bitmap?>(null,file.id,state.queueScope,state.transferring) { if(!file.container&&!state.transferring) value=c.thumbnail(file,state.queueScope) }
-                Column(Modifier.clip(shape).background(if(file.id in selected)MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer)
-                    .combinedClickable(enabled=!state.transferring||!file.container,onClick={
-                        if(file.container)c.browse(file.id)
-                        else if(selected.isNotEmpty())selected=if(file.id in selected)selected-file.id else selected+file.id
-                        else preview=file.id
-                    },onLongClick={if(!file.container)selected=selected+file.id})) {
-                    Box(Modifier.fillMaxWidth().aspectRatio(1f),contentAlignment=Alignment.Center) {
-                        if(bitmap!=null) Image(bitmap!!.asImageBitmap(),file.name,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)
-                        else Icon(if(file.container)Icons.Outlined.Folder else if(file.raw)Icons.Outlined.RawOn else Icons.Outlined.Image,null,Modifier.size(32.dp),tint=MaterialTheme.colorScheme.onSurfaceVariant)
-                        if(!file.container) IconButton(onClick={detail=file},modifier=Modifier.align(Alignment.TopStart)) { Icon(Icons.Outlined.Info,"照片信息",tint=MaterialTheme.colorScheme.onSurface) }
-                        if(file.id in selected) Icon(Icons.Outlined.CheckCircle,"已选择",Modifier.align(Alignment.TopEnd).padding(6.dp),tint=MaterialTheme.colorScheme.primary)
-                    }
-                    Text(file.name,Modifier.padding(horizontal=8.dp,vertical=4.dp),style=MaterialTheme.typography.labelMedium,maxLines=1,overflow=TextOverflow.Ellipsis)
-                    Text(if(file.container) "文件夹" else (if(file.raw)"ARW · " else "JPEG · ")+bytes(file.size),Modifier.padding(start=8.dp,end=8.dp,bottom=8.dp),style=MaterialTheme.typography.labelSmall)
-                }
-            }
-        }
-        if(unsupported>0) Text("所选的 $unsupported 个文件未提供${selectedSize.title}，请更改尺寸或取消选择。",Modifier.padding(horizontal=16.dp),style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.error)
-        if(selected.isNotEmpty()) Button(onClick={
-            val choices=selectedFiles.map { f->
-                if(f.handle!=null)f else {
-                    val resource=f.jpegResource(selectedSize)
-                    f.copy(resources=listOfNotNull(resource),size=resource?.size?:0)
-                }
-            }
-            c.enqueue(choices);selected=emptySet()
-        },Modifier.fillMaxWidth().padding(horizontal=16.dp),enabled=unsupported==0 && selectedFiles.isNotEmpty(),shape=shape){Text("下载 ${selectedFiles.size} 个文件")}
-        QueuePanel(state,c)
-    }
-    preview?.let { key ->
-        val pictures=files.filter { !it.container }
-        PhotoViewer(pictures.map { file -> ViewerImage(file.id,file.name,
-            if(file.raw && file.handle!=null)"相机缩略预览 · ARW 原文件可单独下载" else "相机预览 · 下载后保存") },key,
-            refreshKey=state.transferring,onDismiss={preview=null},load={ image -> c.cameraPreview(pictures.first { it.id==image.key },state.queueScope) }) { image ->
-            val file=pictures.first { it.id==image.key }
-            TextButton(onClick={detail=file}) { Icon(Icons.Outlined.Info,null);Spacer(Modifier.width(4.dp));Text("信息") }
-            TextButton(onClick={
-                val resource=file.jpegResource(selectedSize)
-                c.enqueue(listOf(if(file.handle!=null)file else file.copy(resources=listOfNotNull(resource),size=resource?.size?:0)))
-            },enabled=file.handle!=null || file.jpegResource(selectedSize)!=null) { Icon(Icons.Outlined.FileDownload,null);Spacer(Modifier.width(4.dp));Text("下载") }
-            TextButton(onClick={selected=selected+file.id;preview=null}) { Icon(Icons.Outlined.CheckCircleOutline,null);Spacer(Modifier.width(4.dp));Text("选择") }
-        }
-    }
-    detail?.let { file -> AlertDialog(onDismissRequest={detail=null},title={Text(file.name)},text={
-        Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            if(file.date.isNotBlank()) Text(file.date)
-            if(file.handle!=null) Text("${if(file.raw) "ARW 原文件" else "JPEG 原文件"} · ${bytes(file.size)}")
-            else {
-                if(file.raw) Text("此 ARW 条目提供的可下载资源为 JPEG 预览。")
-                file.resources.filter { it.isJpeg }.distinctBy { it.url }.forEach { resource ->
-                    Text(listOfNotNull(resource.jpegSize?.title ?: "JPEG",resource.resolution.takeIf { it.isNotBlank() },resource.size.takeIf { it>0 }?.let(::bytes)).joinToString(" · "))
-                }
-            }
-        }
-    },confirmButton={TextButton(onClick={detail=null}){Text("关闭")}}) }
-}
-
-@Composable private fun QueuePanel(state:AppState,c:CompanionController) {
-    if(state.queue.isEmpty())return
-    var expanded by rememberSaveable { mutableStateOf(false) }
-    val active=state.queue.firstOrNull{it.state=="传输中"}
-    Surface(tonalElevation=2.dp) { Column(Modifier.fillMaxWidth().padding(12.dp)) {
-        if(state.queueNotice.isNotBlank()) Text(state.queueNotice,style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(verticalAlignment=Alignment.CenterVertically) {
-            Text(active?.file?.name ?: "队列 · ${state.queue.count { it.state=="完成"||it.state=="已存在" }} / ${state.queue.size}",Modifier.weight(1f),maxLines=1,style=MaterialTheme.typography.labelLarge)
-            if(state.transferring)TextButton(onClick=c::cancelTransfers){Text("取消")}
-            else TextButton(onClick={c.retryFailed()},enabled=state.connected&&!state.busy){Text("继续未完成")}
-            IconButton(onClick={expanded=!expanded}){Icon(if(expanded)Icons.Outlined.ExpandMore else Icons.Outlined.ExpandLess,"队列详情")}
-        }
-        if(active!=null) {
-            if(active.total>0)LinearProgressIndicator(progress={(active.received.toFloat()/active.total).coerceIn(0f,1f)},modifier=Modifier.fillMaxWidth()) else LinearProgressIndicator(Modifier.fillMaxWidth())
-            Text("${bytes(active.received)} / ${bytes(active.total)}",style=MaterialTheme.typography.labelSmall)
-        }
-        if(expanded) {
-            Column(Modifier.heightIn(max=180.dp).verticalScroll(rememberScrollState())) { state.queue.takeLast(50).forEach { item->Text("${item.file.name} · ${item.state}${item.error?.let{"\n$it"}?:""}",style=MaterialTheme.typography.bodySmall,modifier=Modifier.padding(vertical=4.dp)) } }
-            if(!state.transferring)TextButton(onClick=c::clearCompleted){Text("清空队列记录")}
-        }
-    } }
 }
 
 @Composable private fun SettingsPage(state:AppState,c:CompanionController,theme:String,dynamic:Boolean,setTheme:(String)->Unit,setDynamic:(Boolean)->Unit,permissions:()->Unit) {
@@ -314,16 +197,4 @@ private fun connectionSubtitle(state:AppState):String=when {
     if(registerUsb) AlertDialog(onDismissRequest={registerUsb=false},title={Text("登记相机的接收端？")},text={
         Text("$usbInfo\n\n这会替换相机“发送到电脑”的接收端设置。"+(if(guid.isBlank()) "将生成并保存本应用专用 GUID。" else "将登记输入框中的 GUID。")+"如需保留电脑接收端，请先保存其 GUID。")
     },confirmButton={TextButton(onClick={registerUsb=false;c.registerUsbGuid(guid) { guid=it }}){Text("登记")}},dismissButton={TextButton(onClick={registerUsb=false}){Text("取消")}})
-}
-
-@Composable private fun EmptyState(icon:ImageVector,title:String,text:String) {
-    Column(Modifier.fillMaxSize().padding(28.dp),verticalArrangement=Arrangement.Center,horizontalAlignment=Alignment.CenterHorizontally) {
-        Icon(icon,null,Modifier.size(46.dp),tint=MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(16.dp));Text(title,style=MaterialTheme.typography.titleLarge)
-        Spacer(Modifier.height(8.dp));Text(text,style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-private fun bytes(value:Long):String = when {
-    value<=0->"未知大小";value<1024->"$value B";value<1024*1024->String.format(Locale.ROOT,"%.1f KB",value/1024.0)
-    else->String.format(Locale.ROOT,"%.1f MB",value/(1024.0*1024))
 }
