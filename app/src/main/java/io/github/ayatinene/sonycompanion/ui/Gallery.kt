@@ -124,7 +124,7 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
             val empty = if (discovered == 0) galleryEmptyState(state.mode, state.scan)
                 else GalleryEmpty("没有符合筛选的文件", "试试切换上方的筛选条件。")
             Box(Modifier.weight(1f)) { EmptyState(emptyIcon(state), empty.title, empty.text) }
-        } else LazyVerticalGrid(state=gridState, columns=GridCells.Adaptive(120.dp), Modifier.weight(1f).testTag("gallery-grid"),
+        } else LazyVerticalGrid(state=gridState, columns=GridCells.Adaptive(120.dp), modifier=Modifier.weight(1f).testTag("gallery-grid"),
             contentPadding=PaddingValues(12.dp), verticalArrangement=Arrangement.spacedBy(8.dp), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             items(files, key={ it.id }) { file ->
                 val bitmap by produceState<Bitmap?>(null, file.id, scope, generation, canRead) {
