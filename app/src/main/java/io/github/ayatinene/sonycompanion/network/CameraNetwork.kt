@@ -13,7 +13,6 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.Closeable
 import java.net.*
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resumeWithException
 
@@ -88,16 +87,30 @@ suspend fun resolveCameraDescriptions(
 
 class CameraHttpError(val code: Int) : java.io.IOException("相机 HTTP $code")
 
+/** Thrown once [CameraHttp.close] terminated the transport: a closed client never opens a new call. */
+class CameraHttpClosedException : java.io.IOException("相机连接已关闭")
+
 /** All camera HTTP uses the selected Wi-Fi; mobile data stays available to other apps. */
 class CameraHttp(network: Network? = null, private val trace: (String,String)->Unit = {_,_->},
     private val report: (LogLevel,String,Throwable?)->Unit = {_,_,_->}) : Closeable {
     companion object { private val requestIds=AtomicLong() }
-    private val calls = ConcurrentHashMap.newKeySet<Call>()
+    private val lock = Any()
+    private val calls = LinkedHashSet<Call>()
+    @Volatile private var closed = false
+    /** True once [close] terminated the transport; every later request is rejected. */
+    val isClosed: Boolean get() = closed
     val client = OkHttpClient.Builder().apply {
         if (network != null) { socketFactory(network.socketFactory); dns(object:Dns { override fun lookup(hostname:String) = network.getAllByName(hostname).toList() }) }
         connectTimeout(5,TimeUnit.SECONDS); readTimeout(65,TimeUnit.SECONDS)
         followRedirects(false); retryOnConnectionFailure(false)
     }.build()
+    /** Atomically rejects after close and registers the call, so a call can never be enqueued after
+     * [close] drained the set (which would otherwise leak a request past the terminated session). */
+    private fun openCall(request: Request): Call = synchronized(lock) {
+        if(closed) throw CameraHttpClosedException()
+        val call=client.newCall(request); calls += call; call
+    }
+    private fun closeCall(call: Call) { synchronized(lock) { calls -= call } }
     private suspend fun execute(call: Call, allowSoapFault: Boolean): Response = suspendCancellableCoroutine { continuation ->
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object:Callback {
@@ -116,7 +129,7 @@ class CameraHttp(network: Network? = null, private val trace: (String,String)->U
     // Keep cancellation armed until the complete body has been consumed, not just the headers.
     private suspend fun <T> exchange(request: Request, allowSoapFault: Boolean = false, operation: String = request.method, read: suspend (Response)->T): T =
         withContext(Dispatchers.IO) { coroutineScope {
-            val call=client.newCall(request); calls += call
+            val call=openCall(request)
             val id=requestIds.incrementAndGet();val start=System.nanoTime()
             fun elapsed()=(System.nanoTime()-start)/1_000_000
             report(LogLevel.DEBUG,"HTTP #$id → $operation ${request.url}",null)
@@ -135,7 +148,7 @@ class CameraHttp(network: Network? = null, private val trace: (String,String)->U
                 report(LogLevel.WARN,"HTTP #$id failed total=${elapsed()}ms $operation ${request.url}",e)
                 throw e
             }
-            finally { cancellation.cancel(); calls -= call }
+            finally { cancellation.cancel(); closeCall(call) }
         } }
     suspend fun <T> stream(url: String, read: suspend (Response)->T): T = exchange(
         Request.Builder().url(url).header("Accept-Encoding","identity").header("Connection","close").get().build(),read=read)
@@ -154,5 +167,13 @@ class CameraHttp(network: Network? = null, private val trace: (String,String)->U
             source.readUtf8().also { trace("POST $url ${headers["SOAPACTION"] ?: runCatching { org.json.JSONObject(body).optString("method") }.getOrDefault("")}",it) }
         }
     }
-    override fun close() { calls.forEach(Call::cancel); client.dispatcher.cancelAll(); client.connectionPool.evictAll() }
+    override fun close() {
+        val pending: List<Call>
+        synchronized(lock) {
+            if(closed) return
+            closed = true
+            pending = calls.toList(); calls.clear()
+        }
+        pending.forEach(Call::cancel); client.dispatcher.cancelAll(); client.connectionPool.evictAll()
+    }
 }

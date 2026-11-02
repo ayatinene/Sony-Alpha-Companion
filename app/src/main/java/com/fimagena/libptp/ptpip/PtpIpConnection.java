@@ -409,7 +409,7 @@ public class PtpIpConnection extends PtpTransport {
             long mConnectionNumber = ((PtpIpPacket.InitCommandAck) initAck).mConnectionNumber;
             connectChannel("INIT_EVENT", mEventConnection, mAddress.mTcpAddress, new PtpIpPacket.InitEventRequest(mConnectionNumber), PtpIpPacket.InitEventAck.class);
         }
-        catch (PtpIpExceptions.IOError | PtpIpExceptions.MalformedPacket | PtpIpExceptions.ProtocolViolation e) {
+        catch (PtpIpExceptions.IOError | PtpIpExceptions.MalformedPacket | PtpIpExceptions.ProtocolViolation | PtpIpExceptions.OperationFailed e) {
             close();
             log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, "CONNECT")
                     .message("Connect failed")

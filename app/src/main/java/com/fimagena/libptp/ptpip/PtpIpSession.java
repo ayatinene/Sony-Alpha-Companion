@@ -257,11 +257,11 @@ public class PtpIpSession implements PtpTransport.Session {
             PtpOperation.Response response = executeTransaction(PtpOperation.createRequest(PtpOperation.OPSCODE_CloseSession));
             response.validate();
             if (!response.isSuccess()) throw new PtpIpExceptions.OperationFailed("CloseSession", response.getResponseCode());
-        } catch (PtpTransport.TransportIOError error) {
-            // A peer may close its event socket immediately after acknowledging CloseSession.
-            // Only teardown accepts this EOF; object transfer errors still propagate unchanged.
-            if (!mPtpIpConnection.isClosed()) throw error;
         } finally {
+            // A valid OK response is the only confirmation. Any transport failure (including a local
+            // teardown) means the close is unconfirmed and propagates; teardown callers wrap this in
+            // runCatching so a cleanup failure is never mistaken for protocol success. A response
+            // already queued before a later EOF still wins through the FIFO/EOF policy above.
             mIsOpened = false;
         }
     }

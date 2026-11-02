@@ -13,6 +13,7 @@ class SmartphoneTransfer(private val device: Device, private val http: CameraHtt
     private val report: (String) -> Unit = {}) {
     private val content = requireNotNull(device.content) { "未发现 ContentDirectory 服务" }
     var rootId = "PushRoot"; private set
+    private val startedLock = Any()
     private var started = false
     private suspend fun soap(url: URI, service: String, action: String, args: String): String {
         val body = """<?xml version="1.0" encoding="UTF-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:$action xmlns:u="$service">$args</u:$action></s:Body></s:Envelope>"""
@@ -26,7 +27,7 @@ class SmartphoneTransfer(private val device: Device, private val http: CameraHtt
         device.push?.let {
             try {
                 soap(it, PUSH, "X_TransferStart", "")
-                started = true
+                synchronized(startedLock) { started = true }
             } catch (e: CameraHttpError) {
                 if (e.code !in setOf(404, 405, 501)) throw e
                 report("X_TransferStart 不受支持（HTTP ${e.code}），继续 ContentDirectory 浏览")
@@ -61,8 +62,15 @@ class SmartphoneTransfer(private val device: Device, private val http: CameraHtt
         }
         error("目录页数超出限制，请导出诊断信息")
     }
+    /** Claims the started transfer exactly once, before the request is sent, so a failed or repeated
+     * finish never resends X_TransferEnd and two concurrent finishes still send only one. */
     suspend fun finish(error: Boolean = false) {
-        if (started) device.push?.let { soap(it, PUSH, "X_TransferEnd", "<ErrCode>${if(error) 1 else 0}</ErrCode>"); started = false }
+        val push = synchronized(startedLock) {
+            if(!started) return
+            started = false
+            device.push
+        } ?: return
+        soap(push, PUSH, "X_TransferEnd", "<ErrCode>${if(error) 1 else 0}</ErrCode>")
     }
     companion object {
         const val CDS = "urn:schemas-upnp-org:service:ContentDirectory:1"

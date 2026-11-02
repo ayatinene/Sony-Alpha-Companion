@@ -54,6 +54,16 @@ class SessionScheduler(private val pollMillis: Long = 1L) {
 
     val downloadsPending: Int get() = downloads.get()
 
+    /**
+     * Non-blocking attempt to take the transaction slot for a finish sequence. Returns false when a
+     * transaction holds the lock or is already queued, so the caller can abort instead of waiting for
+     * it and appending a late command. Must be paired with [releaseIdle].
+     */
+    fun tryAcquireIdle(): Boolean = mutex.tryLock()
+
+    /** Releases a slot taken by [tryAcquireIdle]. */
+    fun releaseIdle() { mutex.unlock() }
+
     suspend fun <T> run(priority: SessionPriority, block: suspend () -> T): T {
         if (priority == SessionPriority.DOWNLOAD) {
             downloads.incrementAndGet()

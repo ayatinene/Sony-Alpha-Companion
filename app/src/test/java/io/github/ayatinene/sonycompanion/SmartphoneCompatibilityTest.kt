@@ -19,6 +19,50 @@ class SmartphoneCompatibilityTest {
         SmartphoneTransfer(Device("ILCE-7RM2", "SonyImagingDevice", server.url("/dd.xml").toUri(),
             content=server.url("/upnp/control/ContentDirectory").toUri(), push=server.url("/upnp/control/XPushList").toUri()), http, report)
 
+    @Test fun failedBrowseAfterTransferStartIsEndedWithNormalErrorCode() = runBlocking {
+        MockWebServer().use { server -> CameraHttp().use { http ->
+            server.enqueue(MockResponse().setBody("<Envelope><Body/></Envelope>"))     // X_TransferStart succeeds
+            server.enqueue(MockResponse().setResponseCode(500).setBody(fault("501")))  // PushRoot unavailable
+            server.enqueue(MockResponse().setResponseCode(500).setBody(fault("501")))  // PhotoRoot unavailable
+            server.enqueue(MockResponse().setBody("<Envelope><Body/></Envelope>"))     // X_TransferEnd
+            val transfer=transfer(server,http)
+            try { transfer.initialize(); fail("a browse fault must propagate") } catch(e: SoapFault) { assertEquals("501",e.code) }
+            // A failed initialize must still be able to end the started transfer session normally.
+            transfer.finish()
+            assertEquals(4,server.requestCount)
+            server.takeRequest(); server.takeRequest(); server.takeRequest()
+            val end=server.takeRequest()
+            assertTrue(end.getHeader("SOAPACTION")!!.contains("X_TransferEnd"))
+            assertTrue(end.body.readUtf8().contains("<ErrCode>0</ErrCode>"))
+        } }
+    }
+    @Test fun concurrentFinishesSendExactlyOneTransferEnd() = runBlocking {
+        MockWebServer().use { server -> CameraHttp().use { http ->
+            server.enqueue(MockResponse().setBody("<Envelope><Body/></Envelope>")) // X_TransferStart
+            server.enqueue(MockResponse().setBody(emptyPage))                       // browse
+            server.enqueue(MockResponse().setBody("<Envelope><Body/></Envelope>")) // X_TransferEnd
+            val transfer=transfer(server,http)
+            transfer.initialize()
+            val first=async { transfer.finish() }
+            val second=async { transfer.finish() }
+            first.await(); second.await()
+            assertEquals(3,server.requestCount)
+            server.takeRequest(); server.takeRequest()
+            assertTrue(server.takeRequest().getHeader("SOAPACTION")!!.contains("X_TransferEnd"))
+        } }
+    }
+    @Test fun aFailedTransferEndIsNotResent() = runBlocking {
+        MockWebServer().use { server -> CameraHttp().use { http ->
+            server.enqueue(MockResponse().setBody("<Envelope><Body/></Envelope>")) // X_TransferStart
+            server.enqueue(MockResponse().setBody(emptyPage))                       // browse
+            server.enqueue(MockResponse().setResponseCode(500))                     // X_TransferEnd fails
+            val transfer=transfer(server,http)
+            transfer.initialize()
+            runCatching { transfer.finish() }
+            transfer.finish()
+            assertEquals("a claimed End must never be resent",3,server.requestCount)
+        } }
+    }
     @Test fun advertisedContentDirectoryIsUsedWithoutProbingInactiveFallback() = runBlocking {
         MockWebServer().use { server -> CameraHttp().use { http ->
             server.enqueue(MockResponse().setBody(activeXml))

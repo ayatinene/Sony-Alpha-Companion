@@ -29,13 +29,18 @@ import java.util.logging.Logger;
 
 
 public class TcpConnection {
-    private Socket mSocket;
+    private volatile Socket mSocket;
     private javax.net.SocketFactory mSocketFactory = javax.net.SocketFactory.getDefault();
     public void setSocketFactory(javax.net.SocketFactory factory) { mSocketFactory = factory; }
     private OutputStream mOut;
     private InputStream mIn;
     private long mLastActivityTimestamp;
-    private boolean mIsClosed = false;
+    private volatile boolean mIsClosed = false;
+
+    // Serializes only the socket publish (after the blocking connect) with close(), so a socket
+    // created concurrently with close() is closed instead of leaking. The blocking connect itself
+    // is deliberately performed outside this lock.
+    private final Object mSocketLock = new Object();
 
     private final static Logger LOG = Logger.getLogger(Logger.GLOBAL_LOGGER_NAME);
 
@@ -58,8 +63,13 @@ public class TcpConnection {
         };
 
         public void run() {
+            // Capture the streams locally: close() may null the fields while this listener is running.
+            InputStream in;
+            OutputStream out;
+            synchronized (mSocketLock) {in = mIn; out = mOut;}
+            if (in == null) return;
             PtpIpPacket packet;
-            PtpPacketReader reader = new PtpPacketReader(mIn);
+            PtpPacketReader reader = new PtpPacketReader(in);
             while (true) {
                 try {
                     packet = reader.next();
@@ -74,8 +84,8 @@ public class TcpConnection {
 
                     // something happened --> shutdown send error-packet upwards
                     LOG.severe("PTPIP: Error when receiving packet - closing connection! (" + e.getMessage() + ")");
-                    try {mIn .close();} catch (Exception ex) {}
-                    try {mOut.close();} catch (Exception ex) {}
+                    try {in.close();} catch (Exception ex) {}
+                    try {if (out != null) out.close();} catch (Exception ex) {}
 
                     packet = new PtpIpPacket.Error(e);
                     packet.setSourceConnection(TcpConnection.this);
@@ -92,16 +102,35 @@ public class TcpConnection {
     }
 
     public void connect(InetSocketAddress server) throws IOException {
+        Socket socket = null;
         try {
-            mSocket = mSocketFactory.createSocket();
-            mSocket.setSoTimeout(0);
-            mSocket.setKeepAlive(true);
-            mSocket.setTcpNoDelay(true);
-            mSocket.connect(server, 8000);
-            mOut = mSocket.getOutputStream();
-            mIn = mSocket.getInputStream();
+            socket = mSocketFactory.createSocket();
+            socket.setSoTimeout(0);
+            socket.setKeepAlive(true);
+            socket.setTcpNoDelay(true);
+            // Publish the freshly created (not yet connected) socket under the same lock as close(), so
+            // a concurrent close() can close it and unblock the connect below. The blocking connect is
+            // deliberately performed outside the lock.
+            synchronized (mSocketLock) {
+                if (mIsClosed) {
+                    try {socket.close();} catch (Exception ignored) {}
+                    throw new IOException("TCP connection closed during connect");
+                }
+                mSocket = socket;
+            }
+            socket.connect(server, 8000);
+            synchronized (mSocketLock) {
+                // Re-check: a close() during the connect may have closed the socket already.
+                if (mIsClosed) {
+                    try {socket.close();} catch (Exception ignored) {}
+                    throw new IOException("TCP connection closed during connect");
+                }
+                mOut = socket.getOutputStream();
+                mIn = socket.getInputStream();
+            }
             mLastActivityTimestamp = System.currentTimeMillis();
         } catch (IOException e) {
+            if (socket != null) {try {socket.close();} catch (Exception ignored) {}}
             LOG.severe("Error on establishing TCP connection - closing! (" + e.getMessage() + ")");
             close();
             throw e;
@@ -111,9 +140,11 @@ public class TcpConnection {
 
     public void sendPacket(PtpIpPacket packet) throws IOException {
         LOG.info("PTPIP: Packet out ==> " + safeDescription(packet));
-        if ((mSocket == null) || (mSocket.isClosed()) || (!mSocket.isConnected())) throw new IOException();
-        mOut.write(packet.serializePacket());
-        mOut.flush();
+        Socket socket = mSocket;
+        OutputStream out = mOut;
+        if ((socket == null) || (socket.isClosed()) || (!socket.isConnected()) || (out == null)) throw new IOException();
+        out.write(packet.serializePacket());
+        out.flush();
         mLastActivityTimestamp = System.currentTimeMillis();
     }
 
@@ -129,10 +160,18 @@ public class TcpConnection {
 
     public void close() {
         LOG.info("PTPIP: Closing TCP connection");
-        mIsClosed = true;
-        try {mIn .close();} catch (Exception e) {}
-        try {mOut.close();} catch (Exception e) {}
-        try {mSocket.close();} catch (Exception e) {}
+        Socket socket;
+        InputStream in;
+        OutputStream out;
+        synchronized (mSocketLock) {
+            mIsClosed = true;
+            socket = mSocket; mSocket = null;
+            in = mIn; mIn = null;
+            out = mOut; mOut = null;
+        }
+        try {if (in != null) in.close();} catch (Exception e) {}
+        try {if (out != null) out.close();} catch (Exception e) {}
+        try {if (socket != null) socket.close();} catch (Exception e) {}
     }
 
     public long getLastActivityTimestamp() {return mLastActivityTimestamp;}
