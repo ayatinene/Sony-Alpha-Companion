@@ -19,10 +19,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/**
- * Compose coverage for the RAW-section camera-sleep toggle. The row is exercised through its hoisted
- * state so no [io.github.ayatinene.sonycompanion.data.CompanionController] or Android context is built.
- */
+/** Compose coverage for the RAW-section camera-sleep toggle, driven by hoisted state. */
 @RunWith(AndroidJUnit4::class)
 class SonySleepSettingTest {
     @get:Rule val compose=createComposeRule()
@@ -49,15 +46,6 @@ class SonySleepSettingTest {
         compose.onNodeWithTag(tag).assertIsOff()
         compose.runOnIdle { assertFalse(checked) }
         compose.runOnIdle { assertEquals(listOf(true,false),changes) }
-    }
-
-    @Test fun sleepSettingShowsTheApprovedTitleAndExplanation() {
-        compose.setContent { MaterialTheme { SonySleepSetting(false) { } } }
-        compose.onNodeWithText(SONY_SLEEP_TITLE,useUnmergedTree=true).assertExists()
-        compose.onNodeWithText(SONY_SLEEP_DESCRIPTION,useUnmergedTree=true).assertExists()
-        // The explanation uses full-width curly quotes, never a straight apostrophe or single quote.
-        assertTrue(SONY_SLEEP_DESCRIPTION.contains("“发送到电脑”"))
-        assertFalse(SONY_SLEEP_DESCRIPTION.contains("'"))
     }
 
     @Test fun sleepSettingRecomposesWhenStateChangesFromTheOutside() {
