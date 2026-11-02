@@ -21,7 +21,7 @@ class GalleryInterfaceTest {
     private fun jpegResource()=Resource("http://fixture/photo.jpg","image/jpeg",profile="http-get:*:image/jpeg:DLNA.ORG_PN=JPEG_ORG")
     private fun jpegFile(id:String)=CameraFile(id,id,resources=listOf(jpegResource()),date="2026-01-01")
     private fun rawFile(id:String)=CameraFile(id,id,raw=true,handle=1L,date="2026-01-01")
-    private fun computer(files:List<CameraFile>,scan:ScanState,queue:List<QueueItem>=emptyList(),generation:Long=0)=
+    private fun computer(files:List<CameraFile>,scan:ScanState,queue:List<QueueItem> = emptyList(),generation:Long=0)=
         AppState(mode=CameraMode.COMPUTER,connected=true,files=files,scan=scan,queue=queue,sessionGeneration=generation)
     private fun jpeg(files:List<CameraFile>)=AppState(mode=CameraMode.JPEG,connected=true,files=files,scan=ScanState(phase=ScanPhase.Idle))
 

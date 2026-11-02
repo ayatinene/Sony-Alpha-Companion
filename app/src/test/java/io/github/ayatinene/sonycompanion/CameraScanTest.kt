@@ -58,15 +58,27 @@ class CameraScanTest {
         session.gate = CompletableDeferred()
         session.allowFirst = 0
         val first = CompletableDeferred<Triple<Int, Int, Int>>()
+        // Lets the scan pause inside the first batch until the test has inspected the state at that
+        // exact point; without it the scan races ahead into objectInfo before the assertion runs.
+        val inspected = CompletableDeferred<Unit>()
         val scan = launch(Dispatchers.Default) {
             ScanEngine(session, batchIntervalMillis = 0L).scan(
                 isCurrent = { true }, awaitResume = {},
-                onBatch = { s, t, f, _ -> if (!first.isCompleted) first.complete(Triple(s, t, f)) })
+                onBatch = { s, t, f, _ ->
+                    if (!first.isCompleted) {
+                        first.complete(Triple(s, t, f))
+                        inspected.await()
+                    }
+                })
         }
-        val batch = withTimeout(3000) { first.await() }
-        assertEquals(50, batch.second)
-        assertEquals(0, session.infoCalls.get())
-        session.gate!!.complete(Unit)
+        try {
+            val batch = withTimeout(3000) { first.await() }
+            assertEquals(50, batch.second)
+            assertEquals(0, session.infoCalls.get())
+        } finally {
+            inspected.complete(Unit)
+            session.gate!!.complete(Unit)
+        }
         scan.join()
         assertEquals(50, session.infoCalls.get())
     }
@@ -77,17 +89,29 @@ class CameraScanTest {
         session.allowFirst = 1
         session.gate = CompletableDeferred()
         val firstFile = CompletableDeferred<Triple<Int, Int, Int>>()
+        // Holds the scan inside the first-file batch until the test has sampled infoCalls; otherwise
+        // the loop can already be blocked on the second objectInfo when the assertion runs.
+        val inspected = CompletableDeferred<Unit>()
         val scan = launch(Dispatchers.Default) {
             // A long interval must not delay the first supported file.
             ScanEngine(session, batchIntervalMillis = 60_000L).scan(
                 isCurrent = { true }, awaitResume = {},
-                onBatch = { s, t, f, _ -> if (f > 0 && !firstFile.isCompleted) firstFile.complete(Triple(s, t, f)) })
+                onBatch = { s, t, f, _ ->
+                    if (f > 0 && !firstFile.isCompleted) {
+                        firstFile.complete(Triple(s, t, f))
+                        inspected.await()
+                    }
+                })
         }
-        val batch = withTimeout(3000) { firstFile.await() }
-        assertEquals(1, batch.first)
-        assertEquals(1, batch.third)
-        assertEquals("the second object is still slow/blocked", 1, session.infoCalls.get())
-        session.gate!!.complete(Unit)
+        try {
+            val batch = withTimeout(3000) { firstFile.await() }
+            assertEquals(1, batch.first)
+            assertEquals(1, batch.third)
+            assertEquals("the second object is still slow/blocked", 1, session.infoCalls.get())
+        } finally {
+            inspected.complete(Unit)
+            session.gate!!.complete(Unit)
+        }
         scan.join()
         assertEquals(3, session.infoCalls.get())
     }
