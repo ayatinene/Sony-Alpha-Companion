@@ -284,7 +284,7 @@ public class PtpIpConnection extends PtpTransport {
         PtpOperation.Request request = PtpOperation.createRequest(PtpOperation.OPSCODE_OpenSession);
         request.setParameters(new long[]{SESSION_ID});
         PtpOperation.Response response = mSingleSession.executeNullTransaction(request);
-        long responseCode = response.getResponseCode();
+        int responseCode = response.getResponseCode();
 
         // Known PTP/IP spec special case: SessionAlreadyOpen is the only response that
         // carries a single SessionID parameter. It is still a failure (the camera holds a
