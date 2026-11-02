@@ -283,17 +283,34 @@ class GalleryInterfaceTest {
         compose.onNodeWithText("另有 1 项被筛选隐藏，不会下载。").assertExists()
     }
 
+    private fun firstVisibleTag(containerTag: String, ids: List<String>): String {
+        val container = compose.onNodeWithTag(containerTag).fetchSemanticsNode().boundsInRoot
+        val visible = ids.mapNotNull { id ->
+            val node = compose.onAllNodesWithTag("gallery-item-$id").fetchSemanticsNodes().firstOrNull() ?: return@mapNotNull null
+            val bounds = node.boundsInRoot
+            if (bounds.width <= 0f || bounds.height <= 0f || !bounds.overlaps(container)) return@mapNotNull null
+            id to bounds
+        }
+        return visible.minWithOrNull(compareBy({ it.second.top }, { it.second.left }))?.first
+            ?: error("no gallery item is visible")
+    }
+
     @Test fun layoutSwitchKeepsTheFirstVisibleItemInBothDirections() {
-        val initial=(1..24).map { rawFile("f"+it.toString().padStart(2,'0')) }
-        render(computer(initial,ScanState(phase=ScanPhase.Done)))
-        compose.onNodeWithTag("gallery-grid").performScrollToIndex(19)
-        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+        // Fixture must overflow tablet grids so the anchor is a non-zero first visible item.
+        val ids=(1..60).map { "f"+it.toString().padStart(2,'0') }
+        render(computer(ids.map { rawFile(it) },ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithTag("gallery-grid").performScrollToIndex(40)
+        val gridAnchor=firstVisibleTag("gallery-grid",ids)
+        assertTrue(gridAnchor!=ids.first())
         compose.onNodeWithTag("gallery-layout-toggle").performClick()
         compose.onNodeWithTag("gallery-list").assertExists()
-        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+        compose.onNodeWithTag("gallery-item-$gridAnchor").assertIsDisplayed()
+        compose.onNodeWithTag("gallery-list").performScrollToIndex(40)
+        val listAnchor=firstVisibleTag("gallery-list",ids)
+        assertTrue(listAnchor!=ids.first())
         compose.onNodeWithTag("gallery-layout-toggle").performClick()
         compose.onNodeWithTag("gallery-grid").assertExists()
-        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+        compose.onNodeWithTag("gallery-item-$listAnchor").assertIsDisplayed()
     }
 
     @Test fun listAppendKeepsTheScrollAnchor() {
