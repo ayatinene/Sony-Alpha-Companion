@@ -130,7 +130,10 @@ class CompanionController(private val context: Context) {
                         ComputerTransfer.parseGuid(guid)
                         val host=prefs.getString("computerHost","").orEmpty().trim().ifBlank {
                             val devices=networks.discover(network,transport,false,"",computer=true)
-                            require(devices.size==1) { "没有唯一的 MtpNullService 相机，请在设置填写相机的局域网 IP" }
+                            require(devices.size==1) {
+                                if(devices.isEmpty()) "未找到相机，请检查与相机是否在同一局域网，或在设置填写相机 IP。"
+                                else "发现多个相机，请在设置中填写目标相机 IP。"
+                            }
                             devices.single().description.host
                         }
                         val transfer=ComputerTransfer(network); computer=transfer
@@ -138,13 +141,13 @@ class CompanionController(private val context: Context) {
                         val device=Device(model,model,java.net.URI("http://$host"),serial=transfer.serial,
                             identity=CameraIdentity(model=model,firmware=transfer.firmware))
                         attachQueue(device,mode)
-                        update { copy(device=device,message="读取文件对象…") }
+                        update { copy(device=device,message="读取相机文件列表…") }
                         val files=transfer.files { count-> update { copy(message="已读取 $count 个文件…") } }
-                        update { copy(connected=true,files=files,message="PTP/IP 已连接 · 尚未实机验证") }
+                        update { copy(connected=true,files=files,message="已连接 · 原文件传输") }
                     } else {
                         val devices = networks.discover(network,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
                         require(devices.size==1) {
-                            if(devices.isEmpty()) "没有发现匹配服务。请确认相机工作模式、Wi-Fi 和附近设备权限；可在设置填写描述文件 URL。"
+                            if(devices.isEmpty()) "没有发现相机。请确认相机工作模式、Wi-Fi 和附近设备权限，或在设置填写描述文件 URL。"
                             else "发现多个相机，请在设置填写目标相机的描述文件 URL"
                         }
                         val device=devices.single(); log("发现 ${device.model} ${device.description} remote=${device.remote} content=${device.content} push=${device.push}",tag="CONNECT")
@@ -159,7 +162,7 @@ class CompanionController(private val context: Context) {
                         } else {
                             val transfer=SmartphoneTransfer(device,transport) { log(it,LogLevel.WARN,"BROWSE") }; smartphone=transfer
                             val files=transfer.initialize()
-                            update { copy(connected=true,files=files,folder=transfer.rootId,message="JPEG 服务已连接 · ${transfer.rootId}") }
+                            update { copy(connected=true,files=files,folder=transfer.rootId,message="已连接 · JPEG 传输") }
                             log("JPEG 连接成功 root=${transfer.rootId} entries=${files.size}",tag="CONNECT")
                         }
                         loadIdentity(device,transport)
@@ -180,8 +183,8 @@ class CompanionController(private val context: Context) {
             log("读取下载队列：${it.message}",LogLevel.WARN,"QUEUE",it)
         }.getOrDefault(emptyList()) }
         update { copy(queueScope=key,queue=saved,queueNotice=if(device.cameraId==null)
-            "相机未提供唯一身份；本次任务单独保存，不自动关联旧队列。" else
-            if(saved.any { it.state !in setOf("完成","已存在") }) "已恢复此相机的队列，继续前会重新核对文件。" else "") }
+            "无法确认相机身份，重连后需重新选择下载文件。" else
+            if(saved.any { it.state !in setOf("完成","已存在") }) "已恢复未完成的下载，继续前会重新确认文件。" else "") }
         log("相机队列 camera=${device.displayName} identified=${device.cameraId!=null} entries=${saved.size}",tag="QUEUE")
     }
     private fun loadIdentity(device: Device, transport: CameraHttp) {
@@ -353,7 +356,7 @@ class CompanionController(private val context: Context) {
     suspend fun cameraPreview(file: CameraFile, expectedScope: String?): Bitmap? {
         val snapshot=state.value;val transport=http;val ptp=computer
         return withContext(Dispatchers.IO) { thumbnailGate.withPermit {
-        check(snapshot.queueScope==expectedScope && state.value.queueScope==expectedScope) { "相机会话已更换" }
+        check(snapshot.queueScope==expectedScope && state.value.queueScope==expectedScope) { "相机连接已变化，请重新打开预览" }
         check(snapshot.connected && state.value.connected) { "相机已断开" }
         check(!snapshot.transferring) { "文件正在传输，完成后可读取预览" }
         if(file.handle!=null && file.raw) {
@@ -370,7 +373,7 @@ class CompanionController(private val context: Context) {
                 body.byteStream().use { input -> StreamCopy.copy(input,output,expected,{ensureActive()}) { _,_-> } }
             }
         }
-        check(state.value.queueScope==snapshot.queueScope && state.value.connected) { "相机会话已更换" }
+        check(state.value.queueScope==snapshot.queueScope && state.value.connected) { "相机连接已变化，请重新打开预览" }
         val decoded=PreviewBitmap.decode { cached.inputStream() }
         if(decoded==null) { cached.delete();error("无法解码相机预览，请重新读取") }
         decoded
@@ -406,7 +409,10 @@ class CompanionController(private val context: Context) {
         update { copy(queue=queue) }
         if(queue.any { it.state=="等待" } && !state.value.transferring) {
             try { ContextCompat.startForegroundService(context,Intent(context,TransferService::class.java)) }
-            catch(e:Exception) { update { copy(error="无法启动传输服务：${e.message}",queue=queue.map { if(it.state=="等待")it.copy(state="失败",error="传输服务未启动")else it }) } }
+            catch(e:Exception) {
+                log("无法启动传输服务：${e.message}",LogLevel.ERROR,"TRANSFER",e)
+                update { copy(error="无法开始下载，请稍后重试。",queue=queue.map { if(it.state=="等待")it.copy(state="失败",error="未能开始下载")else it }) }
+            }
         }
     }
     suspend fun beginQueuedTransfers() {
@@ -439,7 +445,7 @@ class CompanionController(private val context: Context) {
                     }
                     progress(0,file.size)
                     try {
-                        val resource = if(file.handle==null) requireNotNull(file.bestResource()) { "相机没有提供 JPEG 资源" } else null
+                        val resource = if(file.handle==null) requireNotNull(file.bestResource()) { "相机没有提供可下载的 JPEG" } else null
                         val isRaw=file.handle!=null && file.raw
                         val name=if(!isRaw && file.name.endsWith(".arw",true)) file.name.substringBeforeLast('.')+".JPG" else file.name
                         val source=transferSource(sessionScope,file,resource)
@@ -516,7 +522,7 @@ class CompanionController(private val context: Context) {
             val logs=journal.snapshot()
             val json=JSONObject(diagnostics()).put("logging",JSONObject().put("level",journal.minimum.name).put("session",journal.session)
                 .put("dropped",logs.dropped).put("writeFailures",logs.writeFailures)).toString(2)
-            requireNotNull(context.contentResolver.openOutputStream(uri,"wt")) { "无法打开诊断文件" }.use {
+            requireNotNull(context.contentResolver.openOutputStream(uri,"wt")) { "无法写入诊断文件" }.use {
                 DiagnosticBundle.write(it,json,logs,CrashLog.read(context.filesDir))
             }
         }
@@ -540,7 +546,7 @@ class CompanionController(private val context: Context) {
             if(state.value.queueScope!=snapshot.queueScope || !state.value.connected) return@action
             val ready=retry.mapNotNull { refreshed[it.file.id] }
             update { copy(queue=queue.map { item -> if(item in retry && refreshed[item.file.id]==null)
-                item.copy(state="需重新选择",error="当前文件信息不匹配或信息不足，请从相机图库重新选择。") else item }) }
+                item.copy(state="需重新选择",error="无法确认该文件，请从相机图库重新选择。") else item }) }
             enqueue(ready)
         } finally { update { copy(busy=false) } }
     }

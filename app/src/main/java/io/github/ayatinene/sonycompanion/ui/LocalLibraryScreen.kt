@@ -101,7 +101,7 @@ import java.util.Locale
         }
     }
     preview?.let { key ->
-        PhotoViewer(files.map { ViewerImage(it.uri,it.name,if(it.name.endsWith(".arw",true))"RAW · 同名 JPEG 或内嵌预览" else "本地 JPEG") },key,
+        PhotoViewer(files.map { ViewerImage(it.uri,it.name,if(it.name.endsWith(".arw",true))"RAW · JPEG 预览" else "本地 JPEG") },key,
             onDismiss={preview=null},load={ image -> c.photos.fullPreview(files.first { it.uri==image.key }) }) { image ->
             val photo=files.first { it.uri==image.key }
             TextButton(onClick={showInfo(photo)}) { Icon(Icons.Outlined.Info,null);Spacer(Modifier.width(4.dp));Text("信息") }

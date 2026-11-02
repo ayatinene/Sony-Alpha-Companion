@@ -9,6 +9,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.dp
@@ -142,6 +143,13 @@ class InterfaceTest {
         compose.onNodeWithContentDescription("拍照").assertIsNotEnabled()
     }
 
+    @Test fun connectedWorkspaceShowsTheTranslatedCameraStatus() {
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(360.dp,640.dp)) { RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
+        } }
+        compose.onNodeWithText("待机").assertExists()
+    }
+
     @Test fun workspaceBackReturnsWithoutDisconnectingTheSession() {
         var back=false; var disconnected=false
         compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
@@ -173,6 +181,43 @@ class InterfaceTest {
         compose.onNodeWithText("设置").assertExists()
         compose.onNodeWithText("相机").assertDoesNotExist()
         compose.onNodeWithText("未连接").assertExists()
+    }
+
+    @Test fun settingsPageKeepsTheAboutAndLicencesSection() {
+        runBlocking { controller.disconnect(false) }
+        val app=context.applicationContext as CompanionApplication
+        val model=CompanionViewModel(app)
+        compose.setContent { CompanionApp(model,{}, {}) }
+        compose.onNodeWithText("设置").performClick()
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("关于与许可"))
+        compose.onNodeWithText("关于与许可").assertExists()
+        compose.onNode(hasScrollAction()).performScrollToNode(hasText("GPL-3.0", substring=true))
+        compose.onNodeWithText("GPL-3.0", substring=true).assertExists()
+    }
+
+    @Test fun homeStatusCardFillsItsAvailableWidthInEveryStateAndCopyLength() {
+        var state by mutableStateOf(AppState(message="请连接相机"))
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.width(320.dp).height(240.dp).testTag("home-status-host")) { HomeStatusCard(state) }
+        } }
+        val host=bounds("home-status-host")
+        assertEquals(host.width,bounds("home-status-card").width,1f)
+        compose.runOnIdle { state=AppState(connecting=true,message="查找相机…") }
+        assertEquals(host.width,bounds("home-status-card").width,1f)
+        compose.runOnIdle { state=AppState(connected=true,device=Device("ILCE-7RM2","ILCE-7RM2",URI("http://fixture")),message="已连接 · 遥控拍摄") }
+        assertEquals(host.width,bounds("home-status-card").width,1f)
+        compose.runOnIdle { state=AppState(message="一条很长的状态说明，用来确认状态卡不会因为文案长度而改变宽度。".repeat(8)) }
+        assertEquals(host.width,bounds("home-status-card").width,1f)
+    }
+
+    @Test fun homeStatusCardMatchesTheModeCardWidth() {
+        runBlocking { controller.disconnect(false) }
+        val model=CompanionViewModel(context.applicationContext as CompanionApplication)
+        compose.setContent { CompanionApp(model,{}, {}) }
+        val status=bounds("home-status-card")
+        val mode=compose.onAllNodesWithTag("home-mode-card").onFirst().fetchSemanticsNode().boundsInRoot
+        assertEquals("status card spans the same list width as a mode card",mode.width,status.width,1f)
+        assertEquals(mode.left,status.left,1f)
     }
 
     @Test fun viewerSupportsDoubleTapZoomResetAndNextImage() {

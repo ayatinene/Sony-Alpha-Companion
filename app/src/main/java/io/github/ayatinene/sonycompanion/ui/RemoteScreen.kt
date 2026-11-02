@@ -144,7 +144,7 @@ data class RemoteActions(
 }
 
 private fun statusText(state:AppState):String=when {
-    state.connected->state.remote.status.ifBlank { "已连接" }
+    state.connected->remoteStatusLabel(state.remote.status)
     state.connecting->"连接中…"
     else->state.message
 }
