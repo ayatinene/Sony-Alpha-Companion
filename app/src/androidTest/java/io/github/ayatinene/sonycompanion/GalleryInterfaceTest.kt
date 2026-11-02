@@ -3,11 +3,13 @@ package io.github.ayatinene.sonycompanion
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.ayatinene.sonycompanion.data.*
 import io.github.ayatinene.sonycompanion.ui.CameraGallery
 import io.github.ayatinene.sonycompanion.ui.GalleryActions
+import io.github.ayatinene.sonycompanion.ui.galleryTimeText
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -216,5 +218,219 @@ class GalleryInterfaceTest {
         compose.onNodeWithText("相机图库").assertExists()
         compose.onNodeWithText("下载 1 个文件").assertDoesNotExist()
         compose.runOnIdle { assertEquals(0,thumbnails) }
+    }
+
+    @Test fun sortMenuListsSixOptionsInOrderWithTheCurrentOneSelected() {
+        render(computer(listOf(rawFile("a")),ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithTag("gallery-sort-menu").performClick()
+        listOf("拍摄时间：最新优先","拍摄时间：最早优先","文件名：升序","文件名：降序","文件大小：从小到大","文件大小：从大到小").forEach {
+            compose.onNodeWithText(it).assertExists()
+        }
+        compose.onNodeWithTag("gallery-sort-Newest").assertIsSelected()
+        val order=listOf("gallery-sort-Newest","gallery-sort-Oldest","gallery-sort-NameAscending","gallery-sort-NameDescending","gallery-sort-SizeAsc","gallery-sort-SizeDesc")
+            .map { compose.onNodeWithTag(it).fetchSemanticsNode().boundsInRoot.top }
+        assertTrue(order.zipWithNext().all { (top,bottom) -> top<bottom })
+    }
+
+    @Test fun choosingASizeSortUpdatesTheButtonDescription() {
+        render(computer(listOf(rawFile("a")),ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithTag("gallery-sort-menu").performClick()
+        compose.onNodeWithTag("gallery-sort-SizeDesc").performClick()
+        compose.onNodeWithContentDescription("排序：文件大小：从大到小").assertExists()
+    }
+
+    @Test fun choosingASortUpdatesTheButtonDescriptionAndSelection() {
+        render(computer(listOf(rawFile("a")),ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithContentDescription("排序：拍摄时间：最新优先").assertExists()
+        compose.onNodeWithTag("gallery-sort-menu").performClick()
+        compose.onNodeWithTag("gallery-sort-Oldest").performClick()
+        compose.onNodeWithContentDescription("排序：拍摄时间：最早优先").assertExists()
+        compose.onNodeWithTag("gallery-sort-menu").performClick()
+        compose.onNodeWithTag("gallery-sort-Oldest").assertIsSelected()
+        compose.onNodeWithTag("gallery-sort-Newest").assertIsNotSelected()
+    }
+
+    @Test fun layoutToggleShowsAListRowWithNameSecondaryLineAndInfo() {
+        render(computer(listOf(rawFile("a")),ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithTag("gallery-grid").assertExists()
+        compose.onNodeWithContentDescription("切换为详情列表").assertExists()
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-list").assertExists()
+        compose.onNodeWithTag("gallery-grid").assertDoesNotExist()
+        compose.onNodeWithText("a").assertExists()
+        compose.onNodeWithText("ARW · 未知大小",substring=true).assertExists()
+        compose.onNodeWithContentDescription("照片信息 a").assertExists()
+        compose.onNodeWithContentDescription("切换为网格").assertExists()
+    }
+
+    @Test fun folderRowsHaveNoInfoButton() {
+        render(computer(listOf(CameraFile("dir","dir",container=true)),ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithText("文件夹").assertExists()
+        compose.onNodeWithContentDescription("照片信息 dir").assertDoesNotExist()
+    }
+
+    @Test fun switchingLayoutKeepsSelectionAndFilter() {
+        render(computer(listOf(rawFile("a"),jpegFile("b")),ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithTag("gallery-item-a").performTouchInput { longClick() }
+        compose.onNodeWithTag("gallery-item-b").performTouchInput { longClick() }
+        compose.onNodeWithText("ARW").performClick()
+        compose.onNodeWithText("另有 1 项被筛选隐藏，不会下载。").assertExists()
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-list").assertExists()
+        compose.onNodeWithText("下载 1 个文件").assertExists()
+        compose.onAllNodesWithContentDescription("已选择").assertCountEquals(1)
+        compose.onNodeWithText("另有 1 项被筛选隐藏，不会下载。").assertExists()
+    }
+
+    @Test fun layoutSwitchKeepsTheFirstVisibleItemInBothDirections() {
+        val initial=(1..24).map { rawFile("f"+it.toString().padStart(2,'0')) }
+        render(computer(initial,ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithTag("gallery-grid").performScrollToIndex(19)
+        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-list").assertExists()
+        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-grid").assertExists()
+        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+    }
+
+    @Test fun listAppendKeepsTheScrollAnchor() {
+        val initial=(1..24).map { rawFile("f"+it.toString().padStart(2,'0')) }
+        var state by mutableStateOf(computer(initial,ScanState(phase=ScanPhase.Scanning,scanned=24,found=24)))
+        compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions()) } }
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-list").performScrollToIndex(19)
+        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+        compose.runOnIdle { state=state.copy(files=initial+rawFile("f25")) }
+        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+    }
+
+    @Test fun activeSortChangeReturnsToTheTop() {
+        val initial=(1..24).map { rawFile("f"+it.toString().padStart(2,'0')) }
+        render(computer(initial,ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-list").performScrollToIndex(19)
+        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+        compose.onNodeWithTag("gallery-sort-menu").performClick()
+        compose.onNodeWithTag("gallery-sort-NameAscending").performClick()
+        compose.onNodeWithTag("gallery-item-f01").assertIsDisplayed()
+    }
+
+    @Test fun listPreviewDownloadCarriesTheGenerationCapturedWhenOpened() {
+        val calls=mutableListOf<Pair<List<CameraFile>,Long>>()
+        val state=computer(listOf(rawFile("a")),ScanState(phase=ScanPhase.Done),generation=5)
+        compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions(preview={_,_,_->null },enqueue={files,gen-> calls+=files to gen })) } }
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-item-a").performClick()
+        compose.onNodeWithText("下载").performClick()
+        compose.runOnIdle {
+            assertEquals(5L,calls.single().second)
+            assertEquals(listOf("a"),calls.single().first.map { it.id })
+        }
+    }
+
+    @Test fun listLongPressDownloadCarriesTheComposedGeneration() {
+        val calls=mutableListOf<Pair<List<CameraFile>,Long>>()
+        val state=computer(listOf(rawFile("a")),ScanState(phase=ScanPhase.Done),generation=7)
+        compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions(enqueue={files,gen-> calls+=files to gen })) } }
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-item-a").performTouchInput { longClick() }
+        compose.onNodeWithText("下载 1 个文件").performClick()
+        compose.runOnIdle {
+            assertEquals(7L,calls.single().second)
+            assertEquals(listOf("a"),calls.single().first.map { it.id })
+        }
+    }
+
+    @Test fun everySortReordersTheListItems() {
+        val a=CameraFile("a","a",size=300L,date="2026-03-01T00:00:00Z")
+        val b=CameraFile("b","b",size=100L,date="2026-01-01T00:00:00Z")
+        val c=CameraFile("c","c",size=500L,date="2026-02-01T00:00:00Z")
+        render(computer(listOf(a,b,c),ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        fun assertOrder(vararg ids:String) {
+            val tops=ids.map { compose.onNodeWithTag("gallery-item-$it").fetchSemanticsNode().boundsInRoot.top }
+            assertTrue("order $ids", tops.zipWithNext().all { (top,bottom) -> top<bottom })
+        }
+        fun choose(name:String) { compose.onNodeWithTag("gallery-sort-menu").performClick(); compose.onNodeWithTag("gallery-sort-$name").performClick() }
+        assertOrder("a","c","b")
+        choose("Oldest"); assertOrder("b","c","a")
+        choose("NameAscending"); assertOrder("a","b","c")
+        choose("NameDescending"); assertOrder("c","b","a")
+        choose("SizeAsc"); assertOrder("b","a","c")
+        choose("SizeDesc"); assertOrder("c","a","b")
+    }
+
+    @Test fun listInfoOpensTheDetailDialog() {
+        render(computer(listOf(rawFile("a")),ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithContentDescription("照片信息 a").performClick()
+        compose.onNodeWithText("关闭").assertExists()
+    }
+
+    @Test fun listStreamingInsertBeforeTheAnchorKeepsItVisible() {
+        val initial=(1..24).map { rawFile("f"+it.toString().padStart(2,'0')) }
+        var state by mutableStateOf(computer(initial,ScanState(phase=ScanPhase.Scanning,scanned=24,found=24)))
+        compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions()) } }
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-list").performScrollToIndex(19)
+        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+        // f00 sorts before every existing name, shifting the anchor's index down by one.
+        compose.runOnIdle { state=state.copy(files=listOf(rawFile("f00"))+initial) }
+        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+    }
+
+    @Test fun jpegFolderTapBrowsesIntoTheDirectoryInListMode() {
+        val browsed=mutableListOf<String>()
+        render(jpeg(listOf(CameraFile("dir","dir",container=true),jpegFile("a"))),GalleryActions(browse={browsed+=it}))
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-list").assertExists()
+        compose.onNodeWithTag("gallery-item-dir").performClick()
+        compose.runOnIdle { assertEquals(listOf("dir"),browsed) }
+    }
+
+    @Test fun stateRestorationKeepsLayoutFilterAndSort() {
+        val restoration=StateRestorationTester(compose)
+        restoration.setContent { MaterialTheme { CameraGallery(computer(listOf(rawFile("a"),jpegFile("b")),ScanState(phase=ScanPhase.Done)),GalleryActions()) } }
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithText("ARW").performClick()
+        compose.onNodeWithTag("gallery-sort-menu").performClick()
+        compose.onNodeWithTag("gallery-sort-Oldest").performClick()
+        compose.onNodeWithTag("gallery-list").assertExists()
+        restoration.emulateSavedInstanceStateRestore()
+        compose.onNodeWithTag("gallery-list").assertExists()
+        compose.onNodeWithContentDescription("排序：拍摄时间：最早优先").assertExists()
+        compose.onNodeWithText("ARW").assertIsSelected()
+    }
+
+    @Test fun stateRestorationKeepsTheListScrollPosition() {
+        val initial=(1..24).map { rawFile("f"+it.toString().padStart(2,'0')) }
+        val restoration=StateRestorationTester(compose)
+        restoration.setContent { MaterialTheme { CameraGallery(computer(initial,ScanState(phase=ScanPhase.Done)),GalleryActions()) } }
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        compose.onNodeWithTag("gallery-list").performScrollToIndex(19)
+        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+        restoration.emulateSavedInstanceStateRestore()
+        compose.onNodeWithTag("gallery-list").assertExists()
+        compose.onNodeWithTag("gallery-item-f20").assertIsDisplayed()
+    }
+
+    @Test fun detailDialogShowsTheFormattedLocalTimeInsteadOfTheRawDateString() {
+        val date="Sat Oct 24 13:00:00 GMT+08:00 2026"
+        val formatted=galleryTimeText(date) ?: error("fixture must parse")
+        render(computer(listOf(CameraFile("a","a",raw=true,handle=1L,date=date)),ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithContentDescription("照片信息 a").performClick()
+        compose.onNodeWithText(formatted).assertExists()
+        compose.onNodeWithText(date).assertDoesNotExist()
+        compose.onNodeWithText("ARW 原文件",substring=true).assertExists()
+    }
+
+    @Test fun detailDialogOmitsAnUnparseableDate() {
+        val broken=CameraFile("b","b",raw=true,handle=1L,date="not a date")
+        render(computer(listOf(broken),ScanState(phase=ScanPhase.Done)))
+        compose.onNodeWithContentDescription("照片信息 b").performClick()
+        compose.onNodeWithText("not a date").assertDoesNotExist()
     }
 }

@@ -82,6 +82,9 @@ data class ScanOutcome(val total: Int, val scanned: Int, val found: Int, val fil
  * count); object info is then read serially. Directories and videos count as scanned; ARW/JPEG
  * count as found. The first snapshot is emitted as soon as the total is known and later ones are
  * throttled by [batchIntervalMillis] (0 emits after every object, used by tests).
+ *
+ * Camera handle order is not guaranteed to match capture time; each storage's returned order is
+ * reversed ([asReversed]) without sorting the opaque handles. Storage order and object count are kept.
  */
 class ScanEngine(private val session: ComputerSession, private val batchIntervalMillis: Long = 250L) {
     suspend fun scan(
@@ -104,7 +107,7 @@ class ScanEngine(private val session: ComputerSession, private val batchInterval
         var publishedFile = false
         onBatch(0, total, 0, emptyList())
         for ((storage, handles) in grouped) {
-            for (handle in handles) {
+            for (handle in handles.asReversed()) {
                 if (!isCurrent()) return ScanOutcome(total, scanned, found.size, found.toList())
                 awaitResume()
                 if (!isCurrent()) return ScanOutcome(total, scanned, found.size, found.toList())

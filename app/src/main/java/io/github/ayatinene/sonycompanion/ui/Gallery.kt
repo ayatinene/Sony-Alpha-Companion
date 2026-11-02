@@ -3,6 +3,7 @@ package io.github.ayatinene.sonycompanion.ui
 import android.graphics.Bitmap
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.shape.*
 import androidx.compose.material.icons.Icons
@@ -16,6 +17,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.ayatinene.sonycompanion.data.*
@@ -68,16 +71,26 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     var detail by remember(state.sessionGeneration, state.folder) { mutableStateOf<CameraFile?>(null) }
     var preview by remember(state.sessionGeneration, state.folder) { mutableStateOf<GalleryPreview?>(null) }
     var filter by rememberSaveable { mutableStateOf("全部") }
-    var descending by rememberSaveable { mutableStateOf(true) }
+    var sortName by rememberSaveable { mutableStateOf(GallerySort.Newest.name) }
+    var layoutName by rememberSaveable { mutableStateOf(GalleryLayout.Grid.name) }
     var sizeChoice by rememberSaveable { mutableStateOf(JpegSize.MAXIMUM.name) }
+    val sort = GallerySort.entries.firstOrNull { it.name == sortName } ?: GallerySort.Newest
+    val layout = GalleryLayout.entries.firstOrNull { it.name == layoutName } ?: GalleryLayout.Grid
+    // The grid and the list keep separate scroll positions; a switch re-anchors on the item first
+    // visible at the click.
     val gridState = rememberLazyGridState()
-    // An explicit filter or sort change returns to the top; streaming appends keep the current anchor.
-    LaunchedEffect(filter, descending) { gridState.scrollToItem(0) }
-    LaunchedEffect(state.mode) { if (state.mode == CameraMode.JPEG && filter == "ARW") filter = "全部" }
+    val listState = rememberLazyListState()
+    var pendingAnchor by remember { mutableStateOf<String?>(null) }
+    var pendingScroll by remember { mutableStateOf(false) }
+    LaunchedEffect(state.mode) {
+        if (state.mode == CameraMode.JPEG && filter == "ARW") { filter = "全部"; pendingAnchor = null; pendingScroll = true }
+    }
 
     val offeredSizes = JpegSize.entries.filter { choice -> state.files.any { !it.container && it.jpegResource(choice) != null } }
     val selectedSize = offeredSizes.firstOrNull { it.name == sizeChoice } ?: JpegSize.MAXIMUM
-    val files = gallerySorted(galleryFiltered(state.files, filter), descending)
+    // Derive off the inputs so an unrelated recomposition (selection, queue progress) never re-parses dates.
+    val filtered = remember(state.files, filter) { galleryFiltered(state.files, filter) }
+    val files = remember(filtered, sort) { gallerySorted(filtered, sort) }
     val selectableIds = selectAllIds(files)
     val selectedVisible = visibleSelected(selected, selectableIds)
     val hiddenSelected = hiddenSelectedCount(selected, selectableIds)
@@ -88,6 +101,32 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     val canDownload = downloadNewFilesEnabled(state.connected, state.scan)
     val scope = state.queueScope
     val generation = state.sessionGeneration
+    // Filter/sort changes return to the top; one effect applies the pending anchor so a restore is
+    // never overwritten.
+    val requestTop: () -> Unit = { pendingAnchor = null; pendingScroll = true }
+    val switchLayout: () -> Unit = {
+        pendingAnchor = if (layout == GalleryLayout.Grid) {
+            gridState.layoutInfo.visibleItemsInfo.firstOrNull()?.key as? String
+        } else {
+            listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key as? String
+        }
+        pendingScroll = true
+        layoutName = (if (layout == GalleryLayout.Grid) GalleryLayout.List else GalleryLayout.Grid).name
+    }
+    LaunchedEffect(layoutName, pendingScroll) {
+        if (!pendingScroll) return@LaunchedEffect
+        // No list is mounted while empty; drop the pending scroll instead of suspending on it.
+        if (files.isEmpty()) { pendingScroll = false; return@LaunchedEffect }
+        val index = pendingAnchor?.let { id -> files.indexOfFirst { it.id == id }.takeIf { it >= 0 } } ?: 0
+        if (layout == GalleryLayout.Grid) gridState.scrollToItem(index) else listState.scrollToItem(index)
+        pendingScroll = false
+    }
+    val onItemClick: (CameraFile) -> Unit = { file ->
+        if (file.container) actions.browse(file.id)
+        else if (selectedVisible.isNotEmpty()) selected = if (file.id in selected) selected - file.id else selected + file.id
+        else preview = GalleryPreview(file.id, scope, generation)
+    }
+    val onItemLongClick: (CameraFile) -> Unit = { file -> if (!file.container) selected = selected + file.id }
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal=12.dp), verticalAlignment=Alignment.CenterVertically) {
@@ -96,7 +135,30 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
         }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=12.dp),
             horizontalArrangement=Arrangement.spacedBy(4.dp), verticalAlignment=Alignment.CenterVertically) {
-            IconButton(onClick={ descending = !descending }) { Icon(Icons.Outlined.Sort, "切换排序") }
+            var sortMenu by remember { mutableStateOf(false) }
+            Box {
+                IconButton(onClick={ sortMenu = true }, modifier=Modifier.size(48.dp).testTag("gallery-sort-menu")) {
+                    Icon(Icons.Outlined.Sort, "排序：${sort.title}")
+                }
+                DropdownMenu(sortMenu, { sortMenu = false }) {
+                    GallerySort.entries.forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.title) },
+                            onClick = { sortMenu = false; if (option.name != sortName) { sortName = option.name; requestTop() } },
+                            modifier = Modifier.testTag("gallery-sort-${option.name}")
+                                .semantics { this.selected = option.name == sortName },
+                            leadingIcon = {
+                                if (option.name == sortName) Icon(Icons.Outlined.Check, null)
+                                else Spacer(Modifier.size(24.dp))
+                            }
+                        )
+                    }
+                }
+            }
+            IconButton(onClick = switchLayout, modifier=Modifier.size(48.dp).testTag("gallery-layout-toggle")) {
+                Icon(if (layout == GalleryLayout.Grid) Icons.Outlined.ViewList else Icons.Outlined.GridView,
+                    if (layout == GalleryLayout.Grid) "切换为详情列表" else "切换为网格")
+            }
             if (selected.isNotEmpty()) TextButton(onClick={ selected = emptySet() }) { Text("取消选择") }
             TextButton(onClick={ selected = if (allVisibleSelected) selected - selectableIds else selected + selectableIds }) {
                 Text(if (allVisibleSelected) "取消全选" else "全选 ${selectableIds.size}")
@@ -105,7 +167,7 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=16.dp),
             horizontalArrangement=Arrangement.spacedBy(6.dp), verticalAlignment=Alignment.CenterVertically) {
             listOf("全部", "JPEG", "ARW").filter { state.mode == CameraMode.COMPUTER || it != "ARW" }.forEach { name ->
-                FilterChip(selected = filter == name, onClick = { filter = name }, label = { Text(name) })
+                FilterChip(selected = filter == name, onClick = { if (filter != name) { filter = name; requestTop() } }, label = { Text(name) })
             }
             if (state.mode == CameraMode.JPEG) {
                 var menu by remember { mutableStateOf(false) }
@@ -124,27 +186,49 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
             val empty = if (discovered == 0) galleryEmptyState(state.mode, state.scan)
                 else GalleryEmpty("没有符合筛选的文件", "试试切换上方的筛选条件。")
             Box(Modifier.weight(1f)) { EmptyState(emptyIcon(state), empty.title, empty.text) }
-        } else LazyVerticalGrid(state=gridState, columns=GridCells.Adaptive(120.dp), modifier=Modifier.weight(1f).testTag("gallery-grid"),
-            contentPadding=PaddingValues(12.dp), verticalArrangement=Arrangement.spacedBy(8.dp), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-            items(files, key={ it.id }) { file ->
-                val bitmap by produceState<Bitmap?>(null, file.id, scope, generation, canRead) {
-                    if (!file.container && canRead) value = actions.thumbnail(file, scope, generation)
-                }
-                Column(Modifier.clip(galleryShape).background(if (file.id in selectedVisible) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer)
-                    .testTag("gallery-item-${file.id}")
-                    .combinedClickable(enabled = !state.transferring || !file.container, onClick={
-                        if (file.container) actions.browse(file.id)
-                        else if (selectedVisible.isNotEmpty()) selected = if (file.id in selected) selected - file.id else selected + file.id
-                        else preview = GalleryPreview(file.id, scope, generation)
-                    }, onLongClick={ if (!file.container) selected = selected + file.id })) {
-                    Box(Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment=Alignment.Center) {
-                        if (bitmap != null) Image(bitmap!!.asImageBitmap(), file.name, Modifier.fillMaxSize(), contentScale=ContentScale.Crop)
-                        else Icon(if (file.container) Icons.Outlined.Folder else if (file.raw) Icons.Outlined.RawOn else Icons.Outlined.Image, null, Modifier.size(32.dp), tint=MaterialTheme.colorScheme.onSurfaceVariant)
-                        if (!file.container) IconButton(onClick={ detail = file }, modifier=Modifier.align(Alignment.TopStart)) { Icon(Icons.Outlined.Info, "照片信息", tint=MaterialTheme.colorScheme.onSurface) }
-                        if (file.id in selectedVisible) Icon(Icons.Outlined.CheckCircle, "已选择", Modifier.align(Alignment.TopEnd).padding(6.dp), tint=MaterialTheme.colorScheme.primary)
+        } else if (layout == GalleryLayout.Grid) {
+            LazyVerticalGrid(state=gridState, columns=GridCells.Adaptive(120.dp), modifier=Modifier.weight(1f).testTag("gallery-grid"),
+                contentPadding=PaddingValues(12.dp), verticalArrangement=Arrangement.spacedBy(8.dp), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                items(files, key={ it.id }) { file ->
+                    val bitmap = galleryThumbnail(file, scope, generation, canRead, actions)
+                    Column(Modifier.clip(galleryShape).background(if (file.id in selectedVisible) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer)
+                        .testTag("gallery-item-${file.id}")
+                        .semantics { this.selected = file.id in selectedVisible }
+                        .combinedClickable(enabled = !state.transferring || !file.container, onClick={ onItemClick(file) }, onLongClick={ onItemLongClick(file) })) {
+                        Box(Modifier.fillMaxWidth().aspectRatio(1f), contentAlignment=Alignment.Center) {
+                            if (bitmap != null) Image(bitmap.asImageBitmap(), file.name, Modifier.fillMaxSize(), contentScale=ContentScale.Crop)
+                            else Icon(if (file.container) Icons.Outlined.Folder else if (file.raw) Icons.Outlined.RawOn else Icons.Outlined.Image, null, Modifier.size(32.dp), tint=MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (!file.container) IconButton(onClick={ detail = file }, modifier=Modifier.align(Alignment.TopStart)) { Icon(Icons.Outlined.Info, "照片信息 ${file.name}", tint=MaterialTheme.colorScheme.onSurface) }
+                            if (file.id in selectedVisible) Icon(Icons.Outlined.CheckCircle, "已选择", Modifier.align(Alignment.TopEnd).padding(6.dp), tint=MaterialTheme.colorScheme.primary)
+                        }
+                        Text(file.name, Modifier.padding(horizontal=8.dp, vertical=4.dp), style=MaterialTheme.typography.labelMedium, maxLines=1, overflow=TextOverflow.Ellipsis)
+                        Text(if (file.container) "文件夹" else (if (file.raw) "ARW · " else "JPEG · ")+bytes(effectiveFileSize(file)), Modifier.padding(start=8.dp, end=8.dp, bottom=8.dp), style=MaterialTheme.typography.labelSmall)
                     }
-                    Text(file.name, Modifier.padding(horizontal=8.dp, vertical=4.dp), style=MaterialTheme.typography.labelMedium, maxLines=1, overflow=TextOverflow.Ellipsis)
-                    Text(if (file.container) "文件夹" else (if (file.raw) "ARW · " else "JPEG · ")+bytes(file.size), Modifier.padding(start=8.dp, end=8.dp, bottom=8.dp), style=MaterialTheme.typography.labelSmall)
+                }
+            }
+        } else {
+            LazyColumn(state=listState, modifier=Modifier.weight(1f).testTag("gallery-list"),
+                contentPadding=PaddingValues(vertical=4.dp), verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                items(files, key={ it.id }) { file ->
+                    val bitmap = galleryThumbnail(file, scope, generation, canRead, actions)
+                    Row(Modifier.fillMaxWidth().heightIn(min=56.dp).clip(galleryShape)
+                        .background(if (file.id in selectedVisible) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer)
+                        .testTag("gallery-item-${file.id}")
+                        .semantics { this.selected = file.id in selectedVisible }
+                        .combinedClickable(enabled = !state.transferring || !file.container, onClick={ onItemClick(file) }, onLongClick={ onItemLongClick(file) })
+                        .padding(horizontal=8.dp, vertical=4.dp), verticalAlignment=Alignment.CenterVertically) {
+                        Box(Modifier.size(56.dp), contentAlignment=Alignment.Center) {
+                            if (bitmap != null) Image(bitmap.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale=ContentScale.Crop)
+                            else Icon(if (file.container) Icons.Outlined.Folder else if (file.raw) Icons.Outlined.RawOn else Icons.Outlined.Image, null, Modifier.size(28.dp), tint=MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(file.name, style=MaterialTheme.typography.labelLarge, maxLines=1, overflow=TextOverflow.Ellipsis)
+                            Text(gallerySecondaryText(file), style=MaterialTheme.typography.labelSmall, color=MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (!file.container) IconButton(onClick={ detail = file }) { Icon(Icons.Outlined.Info, "照片信息 ${file.name}") }
+                        if (file.id in selectedVisible) Icon(Icons.Outlined.CheckCircle, "已选择", tint=MaterialTheme.colorScheme.primary)
+                    }
                 }
             }
         }
@@ -184,7 +268,7 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     }
     detail?.let { file -> AlertDialog(onDismissRequest={ detail = null }, title={ Text(file.name) }, text={
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement=Arrangement.spacedBy(8.dp)) {
-            if (file.date.isNotBlank()) Text(file.date)
+            galleryTimeText(file.date)?.let { Text(it) }
             if (file.handle != null) Text("${if (file.raw) "ARW 原文件" else "JPEG 原文件"} · ${bytes(file.size)}")
             else {
                 if (file.raw) Text("此 ARW 条目提供的可下载资源为 JPEG 预览。")
@@ -195,6 +279,17 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
         }
     }, confirmButton={ TextButton(onClick={ detail = null }) { Text("关闭") } }) }
 }
+
+@Composable private fun galleryThumbnail(file: CameraFile, scope: String?, generation: Long, canRead: Boolean, actions: GalleryActions): Bitmap? {
+    val bitmap by produceState<Bitmap?>(null, file.id, scope, generation, canRead) {
+        if (!file.container && canRead) value = actions.thumbnail(file, scope, generation)
+    }
+    return bitmap
+}
+
+/** Format · size · local capture time for the list row; the time is omitted when it cannot be read. */
+private fun gallerySecondaryText(file: CameraFile): String = if (file.container) "文件夹"
+    else listOfNotNull(if (file.raw) "ARW" else "JPEG", bytes(effectiveFileSize(file)), galleryTimeText(file.date)).joinToString(" · ")
 
 @Composable private fun ScanBar(state: AppState, actions: GalleryActions) {
     val scan = state.scan

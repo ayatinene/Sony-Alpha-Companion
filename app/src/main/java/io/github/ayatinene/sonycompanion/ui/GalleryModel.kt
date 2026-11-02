@@ -4,6 +4,11 @@ import io.github.ayatinene.sonycompanion.data.CameraFile
 import io.github.ayatinene.sonycompanion.data.CameraMode
 import io.github.ayatinene.sonycompanion.data.ScanPhase
 import io.github.ayatinene.sonycompanion.data.ScanState
+import io.github.ayatinene.sonycompanion.data.captureTimeMillis
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /**
  * Copy and selection rules for the camera gallery. Kept free of Android types so they can be unit
@@ -47,9 +52,105 @@ fun galleryEmptyState(mode: CameraMode?, scan: ScanState): GalleryEmpty = when (
 fun galleryFiltered(files: List<CameraFile>, filter: String): List<CameraFile> =
     files.filter { it.container || filter == "全部" || (filter == "ARW" && it.raw) || (filter == "JPEG" && !it.raw) }
 
-fun gallerySorted(files: List<CameraFile>, descending: Boolean): List<CameraFile> =
-    if (descending) files.sortedWith(compareByDescending<CameraFile> { it.container }.thenByDescending { it.date }.thenByDescending { it.name })
-    else files.sortedWith(compareByDescending<CameraFile> { it.container }.thenBy { it.date }.thenBy { it.name })
+enum class GallerySort(val title: String) {
+    Newest("拍摄时间：最新优先"),
+    Oldest("拍摄时间：最早优先"),
+    NameAscending("文件名：升序"),
+    NameDescending("文件名：降序"),
+    SizeAsc("文件大小：从小到大"),
+    SizeDesc("文件大小：从大到小"),
+}
+
+enum class GalleryLayout { Grid, List }
+
+/** Display and sort size: the file's own size when known, else its best JPEG resource's, else 0. */
+fun effectiveFileSize(file: CameraFile): Long =
+    file.size.takeIf { it > 0 } ?: file.bestResource()?.size?.takeIf { it > 0 } ?: 0L
+
+/** Digit runs compare by value without overflow (leading zeros dropped, length then lexically); text is case-insensitive. */
+internal fun naturalCompare(a: String, b: String): Int {
+    var i = 0
+    var j = 0
+    while (i < a.length && j < b.length) {
+        if (a[i].isDigit() && b[j].isDigit()) {
+            var iEnd = i
+            while (iEnd < a.length && a[iEnd].isDigit()) iEnd++
+            var jEnd = j
+            while (jEnd < b.length && b[jEnd].isDigit()) jEnd++
+            val digitsA = a.substring(i, iEnd).trimStart('0')
+            val digitsB = b.substring(j, jEnd).trimStart('0')
+            if (digitsA.length != digitsB.length) return digitsA.length - digitsB.length
+            val byDigits = digitsA.compareTo(digitsB)
+            if (byDigits != 0) return byDigits
+            i = iEnd
+            j = jEnd
+        } else {
+            val charA = a[i].lowercaseChar()
+            val charB = b[j].lowercaseChar()
+            if (charA != charB) return charA - charB
+            i++
+            j++
+        }
+    }
+    return (a.length - i) - (b.length - j)
+}
+
+/** Natural name order, falling back to the exact name and finally the id so ties stay stable. */
+private fun naturalNameThenId(a: CameraFile, b: CameraFile): Int {
+    val byNatural = naturalCompare(a.name, b.name)
+    if (byNatural != 0) return byNatural
+    val byExact = a.name.compareTo(b.name)
+    if (byExact != 0) return byExact
+    return a.id.compareTo(b.id)
+}
+
+/** Missing capture times sort last in both directions. */
+private fun compareCaptureTime(a: Long?, b: Long?, newestFirst: Boolean): Int {
+    if (a == null && b == null) return 0
+    if (a == null) return 1
+    if (b == null) return -1
+    val byTime = a.compareTo(b)
+    return if (newestFirst) -byTime else byTime
+}
+
+/** Unknown sizes (<= 0) sort last in both directions. */
+private fun compareFileSize(a: Long, b: Long, ascending: Boolean): Int {
+    val aKnown = a > 0
+    val bKnown = b > 0
+    if (aKnown != bKnown) return if (aKnown) -1 else 1
+    if (!aKnown) return 0
+    val bySize = a.compareTo(b)
+    return if (ascending) bySize else -bySize
+}
+
+/** Folders first; only the chosen mode's key is resolved, once per file. */
+fun gallerySorted(files: List<CameraFile>, sort: GallerySort): List<CameraFile> {
+    val times: Map<CameraFile, Long?> =
+        if (sort == GallerySort.Newest || sort == GallerySort.Oldest) files.associateWith { captureTimeMillis(it.date) } else emptyMap()
+    val sizes: Map<CameraFile, Long> =
+        if (sort == GallerySort.SizeAsc || sort == GallerySort.SizeDesc) files.associateWith { effectiveFileSize(it) } else emptyMap()
+    return files.sortedWith(Comparator<CameraFile> { a, b ->
+        if (a.container != b.container) return@Comparator if (a.container) -1 else 1
+        if (a.container) return@Comparator naturalNameThenId(a, b)
+        when (sort) {
+            GallerySort.Newest, GallerySort.Oldest ->
+                compareCaptureTime(times[a], times[b], sort == GallerySort.Newest)
+                    .takeIf { it != 0 } ?: naturalNameThenId(a, b)
+            GallerySort.NameAscending -> naturalNameThenId(a, b)
+            GallerySort.NameDescending ->
+                naturalCompare(a.name, b.name).let { if (it != 0) -it else naturalNameThenId(a, b) }
+            GallerySort.SizeAsc, GallerySort.SizeDesc ->
+                compareFileSize(sizes[a] ?: 0L, sizes[b] ?: 0L, sort == GallerySort.SizeAsc)
+                    .takeIf { it != 0 } ?: naturalNameThenId(a, b)
+        }
+    })
+}
+
+private val galleryTimeFormat = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT)
+
+/** Local wall-clock text for a capture time, or null when the date is missing or unreadable. */
+fun galleryTimeText(date: String, zone: ZoneId = ZoneId.systemDefault()): String? =
+    captureTimeMillis(date, zone)?.let { Instant.ofEpochMilli(it).atZone(zone).format(galleryTimeFormat) }
 
 /** Only files that are on screen may be acted on; a hidden selection is kept but never downloaded. */
 fun visibleSelected(selected: Set<String>, visibleIds: Set<String>): Set<String> = selected intersect visibleIds

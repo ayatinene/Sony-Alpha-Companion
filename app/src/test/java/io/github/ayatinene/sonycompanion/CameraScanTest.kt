@@ -45,11 +45,88 @@ class CameraScanTest {
         assertEquals(5, outcome.total)
         assertEquals(5, outcome.scanned)
         assertEquals(3, outcome.found)
-        assertEquals(listOf("DSC00001.ARW", "DSC00002.JPG", "DSC00003.ARW"), outcome.files.map { it.name })
+        assertEquals(listOf("DSC00003.ARW", "DSC00002.JPG", "DSC00001.ARW"), outcome.files.map { it.name })
         assertEquals(0, batches.first().first)
         assertEquals(5, batches.first().second)
         assertEquals(5, batches.last().first)
         assertEquals(3, batches.last().third)
+    }
+
+    @Test fun walksEachStorageFromTheEndOfTheCameraOrderWithoutSortingByHandle() = runBlocking {
+        // Handles are deliberately not ascending: a sort by handle value would yield 10,20,30 or
+        // 30,20,10. Only the literal array reversal produces this order.
+        val objects = listOf(obj(30, "DSC00003.JPG"), obj(10, "DSC00001.JPG"), obj(20, "DSC00002.JPG"))
+        val session = FakeSession(mapOf(0L to objects))
+        val outcome = ScanEngine(session, batchIntervalMillis = 0L).scan(
+            isCurrent = { true }, awaitResume = {}, onBatch = { _, _, _, _ -> })
+        assertEquals(3, outcome.total)
+        assertEquals(3, outcome.scanned)
+        assertEquals(listOf("DSC00002.JPG", "DSC00001.JPG", "DSC00003.JPG"), outcome.files.map { it.name })
+    }
+
+    @Test fun directoriesAndVideosAreCountedAndNeverDroppedInReverseOrder() = runBlocking {
+        val objects = listOf(
+            obj(1, "DSC00001.ARW"), obj(2, "DCIM", association = true),
+            obj(3, "CLIP.MP4"), obj(4, "DSC00002.JPG"))
+        val session = FakeSession(mapOf(0L to objects))
+        val outcome = ScanEngine(session, batchIntervalMillis = 0L).scan(
+            isCurrent = { true }, awaitResume = {}, onBatch = { _, _, _, _ -> })
+        assertEquals(4, outcome.total)
+        assertEquals(4, outcome.scanned)
+        assertEquals(listOf("DSC00002.JPG", "DSC00001.ARW"), outcome.files.map { it.name })
+    }
+
+    @Test fun eachStorageIsReversedWhileTheStorageOrderIsPreserved() = runBlocking {
+        val session = FakeSession(mapOf(
+            0x100L to listOf(obj(1, "A.JPG"), obj(2, "B.JPG"), obj(3, "C.JPG")),
+            0x200L to listOf(obj(10, "X.JPG"), obj(11, "Y.JPG"))))
+        val outcome = ScanEngine(session, batchIntervalMillis = 0L).scan(
+            isCurrent = { true }, awaitResume = {}, onBatch = { _, _, _, _ -> })
+        assertEquals(5, outcome.total)
+        assertEquals(5, outcome.scanned)
+        assertEquals(listOf("C.JPG", "B.JPG", "A.JPG", "Y.JPG", "X.JPG"), outcome.files.map { it.name })
+    }
+
+    @Test fun firstSupportedFileAfterReversalIsPublishedBeforeSlowerObjects() = runBlocking {
+        val objects = listOf(obj(1, "DSC00001.JPG"), obj(2, "DSC00002.JPG"), obj(3, "DCIM", association = true))
+        val session = FakeSession(mapOf(0L to objects))
+        session.allowFirst = 2
+        session.gate = CompletableDeferred()
+        val firstFile = CompletableDeferred<Triple<Int, Int, Int>>()
+        val inspected = CompletableDeferred<Unit>()
+        val scan = launch(Dispatchers.Default) {
+            // A long interval must not delay the first supported file even after a leading directory.
+            ScanEngine(session, batchIntervalMillis = 60_000L).scan(
+                isCurrent = { true }, awaitResume = {},
+                onBatch = { s, t, f, _ ->
+                    if (f > 0 && !firstFile.isCompleted) {
+                        firstFile.complete(Triple(s, t, f))
+                        inspected.await()
+                    }
+                })
+        }
+        try {
+            val batch = withTimeout(3000) { firstFile.await() }
+            assertEquals(2, batch.first)
+            assertEquals(1, batch.third)
+            assertEquals("the third object is still slow/blocked", 2, session.infoCalls.get())
+        } finally {
+            inspected.complete(Unit)
+            session.gate!!.complete(Unit)
+        }
+        scan.join()
+        assertEquals(3, session.infoCalls.get())
+    }
+
+    @Test fun aSupersededRunStopsBeforeReadingTheRemainingReversedObjects() = runBlocking {
+        val objects = (1..10).map { obj(it.toLong(), "DSC%05d.JPG".format(it)) }
+        val session = FakeSession(mapOf(0L to objects))
+        val batches = AtomicInteger()
+        val outcome = ScanEngine(session, batchIntervalMillis = 0L).scan(
+            isCurrent = { batches.get() < 3 }, awaitResume = {},
+            onBatch = { _, _, _, _ -> batches.incrementAndGet() })
+        assertEquals(2, outcome.scanned)
+        assertEquals(listOf("DSC00010.JPG", "DSC00009.JPG"), outcome.files.map { it.name })
     }
 
     @Test fun firstBatchArrivesBeforeTheScanCompletes() = runBlocking {

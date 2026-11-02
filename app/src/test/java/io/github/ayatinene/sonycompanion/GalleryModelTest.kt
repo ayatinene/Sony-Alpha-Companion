@@ -2,19 +2,25 @@ package io.github.ayatinene.sonycompanion
 
 import io.github.ayatinene.sonycompanion.data.CameraFile
 import io.github.ayatinene.sonycompanion.data.CameraMode
+import io.github.ayatinene.sonycompanion.data.Resource
 import io.github.ayatinene.sonycompanion.data.ScanPhase
 import io.github.ayatinene.sonycompanion.data.ScanState
+import io.github.ayatinene.sonycompanion.ui.GallerySort
 import io.github.ayatinene.sonycompanion.ui.continueHistoryEnabled
 import io.github.ayatinene.sonycompanion.ui.downloadNewFilesEnabled
+import io.github.ayatinene.sonycompanion.ui.effectiveFileSize
 import io.github.ayatinene.sonycompanion.ui.galleryEmptyState
 import io.github.ayatinene.sonycompanion.ui.galleryFiltered
 import io.github.ayatinene.sonycompanion.ui.galleryReadAllowed
 import io.github.ayatinene.sonycompanion.ui.gallerySorted
+import io.github.ayatinene.sonycompanion.ui.galleryTimeText
 import io.github.ayatinene.sonycompanion.ui.hiddenSelectedCount
 import io.github.ayatinene.sonycompanion.ui.scanCountText
 import io.github.ayatinene.sonycompanion.ui.scanHeadline
 import io.github.ayatinene.sonycompanion.ui.selectAllIds
 import io.github.ayatinene.sonycompanion.ui.visibleSelected
+import java.time.Instant
+import java.time.ZoneOffset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -24,6 +30,11 @@ import org.junit.Test
 class GalleryModelTest {
     private fun file(id: String, raw: Boolean = false, date: String = "", container: Boolean = false) =
         CameraFile(id, id, date = date, raw = raw, container = container)
+
+    private fun named(name: String, date: String = "") = CameraFile(name, name, date = date)
+
+    /** The exact `Date.toString` shape a RAW PTP capture reports, built from a real instant. */
+    private fun rawDate(iso: String) = java.util.Date(Instant.parse(iso).toEpochMilli()).toString()
 
     @Test fun scanningWithoutATotalReportsCheckedItemsWithoutInventingOne() {
         assertEquals("已检查 7 项，发现 3 个文件", scanCountText(ScanState(phase = ScanPhase.Scanning, scanned = 7, total = null, found = 3)))
@@ -63,10 +74,122 @@ class GalleryModelTest {
         assertEquals(3, galleryFiltered(files, "全部").size)
     }
 
-    @Test fun sortKeepsFoldersFirstAndHonoursDirection() {
-        val files = listOf(file("dir", container = true), file("a", date = "2026-01-01"), file("b", date = "2026-02-01"))
-        assertEquals(listOf("dir", "b", "a"), gallerySorted(files, descending = true).map { it.id })
-        assertEquals(listOf("dir", "a", "b"), gallerySorted(files, descending = false).map { it.id })
+    @Test fun timeSortsUseRealCaptureMillisForRawDatesAcrossMonthsAndYears() {
+        // Date.toString starts with the weekday, so a lexicographic sort would order these wrongly.
+        val older = file("older", raw = true, date = rawDate("2025-12-31T10:00:00Z"))
+        val newer = file("newer", raw = true, date = rawDate("2026-01-02T10:00:00Z"))
+        val newest = file("newest", raw = true, date = rawDate("2026-02-01T10:00:00Z"))
+        val files = listOf(older, newest, newer)
+        assertEquals(listOf("newest", "newer", "older"), gallerySorted(files, GallerySort.Newest).map { it.id })
+        assertEquals(listOf("older", "newer", "newest"), gallerySorted(files, GallerySort.Oldest).map { it.id })
+    }
+
+    @Test fun isoAndRawDatesAgreeOnTheSameInstant() {
+        val iso = file("iso", date = "2026-01-02T10:30:00Z")
+        val raw = file("raw", raw = true, date = rawDate("2026-01-02T10:30:00Z"))
+        val earlier = file("earlier", date = "2026-01-02T09:00:00Z")
+        // iso and raw share a time, so the natural-name fallback keeps them before the earlier file.
+        assertEquals(listOf("iso", "raw", "earlier"), gallerySorted(listOf(iso, raw, earlier), GallerySort.Newest).map { it.id })
+    }
+
+    @Test fun missingOrUnreadableDatesGoLastInBothTimeDirections() {
+        val dated = file("dated", date = "2026-01-01T00:00:00Z")
+        val blank = file("blank", date = "")
+        val broken = file("broken", date = "not a date")
+        val files = listOf(blank, dated, broken)
+        assertEquals(listOf("dated", "blank", "broken"), gallerySorted(files, GallerySort.Newest).map { it.id })
+        assertEquals(listOf("dated", "blank", "broken"), gallerySorted(files, GallerySort.Oldest).map { it.id })
+    }
+
+    @Test fun sameCaptureTimeFallsBackToNaturalNameAscendingInBothDirections() {
+        val later = file("later", date = "2026-01-01T00:00:00Z")
+        val earlier = file("earlier", date = "2026-01-01T00:00:00Z")
+        val files = listOf(later, earlier)
+        assertEquals(listOf("earlier", "later"), gallerySorted(files, GallerySort.Newest).map { it.id })
+        assertEquals(listOf("earlier", "later"), gallerySorted(files, GallerySort.Oldest).map { it.id })
+    }
+
+    @Test fun identicalNamesAtTheSameTimeFallBackToTheStableId() {
+        val two = CameraFile("2", "same", date = "2026-01-01T00:00:00Z")
+        val one = CameraFile("1", "same", date = "2026-01-01T00:00:00Z")
+        assertEquals(listOf("1", "2"), gallerySorted(listOf(two, one), GallerySort.Newest).map { it.id })
+    }
+
+    @Test fun nameSortOrdersByNameAscendingAndDescending() {
+        val files = listOf(named("b.jpg"), named("a.jpg"), named("c.jpg"))
+        assertEquals(listOf("a.jpg", "b.jpg", "c.jpg"), gallerySorted(files, GallerySort.NameAscending).map { it.name })
+        assertEquals(listOf("c.jpg", "b.jpg", "a.jpg"), gallerySorted(files, GallerySort.NameDescending).map { it.name })
+    }
+
+    @Test fun naturalSortComparesNumbersByValueWithoutOverflow() {
+        val two = named("IMG2")
+        val ten = named("IMG10")
+        val paddedTen = named("IMG" + "0".repeat(28) + "10")
+        val huge = named("IMG" + "1" + "0".repeat(29))
+        val huger = named("IMG" + "9".repeat(30))
+        val sorted = gallerySorted(listOf(ten, two, huge, huger, paddedTen), GallerySort.NameAscending).map { it.name }
+        assertEquals(
+            listOf("IMG2", "IMG" + "0".repeat(28) + "10", "IMG10", "IMG" + "1" + "0".repeat(29), "IMG" + "9".repeat(30)),
+            sorted
+        )
+    }
+
+    @Test fun zeroPaddedNumbersCompareEqualAndFallBackToTheOriginalName() {
+        val plain = named("IMG7")
+        val padded = named("IMG0007")
+        assertEquals(listOf("IMG0007", "IMG7"), gallerySorted(listOf(plain, padded), GallerySort.NameAscending).map { it.name })
+    }
+
+    @Test fun textSortIgnoresCaseAndFallsBackDeterministically() {
+        val upper = named("IMG_1")
+        val lower = named("img_2")
+        assertEquals(listOf("IMG_1", "img_2"), gallerySorted(listOf(lower, upper), GallerySort.NameAscending).map { it.name })
+    }
+
+    @Test fun foldersAlwaysLeadInNaturalNameOrderForEverySort() {
+        val files = listOf(file("b"), file("dir10", container = true), file("a"), file("dir2", container = true))
+        GallerySort.entries.forEach { sort ->
+            val ids = gallerySorted(files, sort).map { it.id }
+            assertEquals("folders first for $sort", listOf("dir2", "dir10"), ids.take(2))
+        }
+    }
+
+    @Test fun sizeSortsPutUnknownLastInBothDirectionsAndTieBreakNaturally() {
+        val small = CameraFile("small", "small", size = 100L)
+        val big = CameraFile("big", "big", size = 5000L)
+        val unknown = CameraFile("unknown", "unknown", size = 0L)
+        val files = listOf(unknown, big, small)
+        assertEquals(listOf("small", "big", "unknown"), gallerySorted(files, GallerySort.SizeAsc).map { it.id })
+        assertEquals(listOf("big", "small", "unknown"), gallerySorted(files, GallerySort.SizeDesc).map { it.id })
+    }
+
+    @Test fun sizeSortFallsBackToNaturalNameThenIdForEqualSizes() {
+        val b = CameraFile("b", "b", size = 10L)
+        val a = CameraFile("a", "a", size = 10L)
+        assertEquals(listOf("a", "b"), gallerySorted(listOf(b, a), GallerySort.SizeAsc).map { it.id })
+    }
+
+    @Test fun effectiveSizePrefersTheOwnSizeThenTheBestJpegResourceAndNeverGuesses() {
+        val own = CameraFile("own", "own", resources = listOf(Resource("u", "image/jpeg", 999L)), size = 50L)
+        assertEquals(50L, effectiveFileSize(own))
+        val viaResource = CameraFile("r", "r", resources = listOf(Resource("u", "image/jpeg", 777L)))
+        assertEquals(777L, effectiveFileSize(viaResource))
+        // A non-JPEG resource is never used to guess a size the sort would not see.
+        val unknown = CameraFile("u", "u", resources = listOf(Resource("u", "video/mp4", 123L)))
+        assertEquals(0L, effectiveFileSize(unknown))
+    }
+
+    @Test fun sizeSortUsesTheSameEffectiveSizeAsTheDisplay() {
+        val byResource = CameraFile("byResource", "byResource", resources = listOf(Resource("u", "image/jpeg", 900L)))
+        val explicit = CameraFile("explicit", "explicit", size = 400L)
+        assertEquals(listOf("explicit", "byResource"), gallerySorted(listOf(byResource, explicit), GallerySort.SizeAsc).map { it.id })
+    }
+
+    @Test fun galleryTimeTextFormatsKnownCaptureTimesAndOmitsMissingOnes() {
+        assertEquals("2026-01-02 10:30", galleryTimeText("2026-01-02T10:30:00Z", ZoneOffset.UTC))
+        assertEquals("2026-01-02 10:30", galleryTimeText(rawDate("2026-01-02T10:30:00Z"), ZoneOffset.UTC))
+        assertNull(galleryTimeText("", ZoneOffset.UTC))
+        assertNull(galleryTimeText("not a date", ZoneOffset.UTC))
     }
 
     @Test fun hiddenSelectionIsCountedButNeverActedOn() {
