@@ -70,14 +70,15 @@ class GeoExifTest {
     @Test fun gpsIsAddedWithoutReencodingOrChangingOriginalCaptureMetadata() {
         val fixture = fixtureJpeg()
         val originalScan = scanBytes(fixture.bytes)
+        val logs = mutableListOf<String>()
         val photo = runBlocking {
             controller.photos.import("GEO_${System.nanoTime()}.JPG", false, fixture.bytes.size.toLong(), "geo-test", "遥控拍摄",
-                geotag = snapshot(), log = {}) { it.write(fixture.bytes) }
+                geotag = snapshot(), log = { logs += it }) { it.write(fixture.bytes) }
         }
         try {
             val read = exif(Uri.parse(photo.uri))
             val latLong = FloatArray(2)
-            assertTrue("GPS latitude/longitude must be present", read.getLatLong(latLong))
+            assertTrue("GPS latitude/longitude must be present; logs=$logs", read.getLatLong(latLong))
             assertEquals(35.681236, latLong[0].toDouble(), 0.001)
             assertEquals(139.767125, latLong[1].toDouble(), 0.001)
             assertEquals("2023:11:14", read.getAttribute(ExifInterface.TAG_GPS_DATESTAMP))
@@ -108,14 +109,15 @@ class GeoExifTest {
     @Test fun gpsGateRecheckedBeforeWriteBackKeepsTheOriginal() {
         val fixture = fixtureJpeg()
         var checks = 0
+        val logs = mutableListOf<String>()
         val photo = runBlocking {
             controller.photos.import("RECHECK_${System.nanoTime()}.JPG", false, fixture.bytes.size.toLong(), "geo-test", "遥控拍摄",
-                geotag = snapshot(), canWriteGeotag = { checks++ == 0 }, log = {}) { it.write(fixture.bytes) }
+                geotag = snapshot(), canWriteGeotag = { checks++ == 0 }, log = { logs += it }) { it.write(fixture.bytes) }
         }
         try {
             val latLong = FloatArray(2)
             assertFalse("a mid-run opt-out must not write GPS", exif(Uri.parse(photo.uri)).getLatLong(latLong))
-            assertTrue("the gate is checked before staging and before the write-back", checks >= 2)
+            assertTrue("the gate is checked before staging and before the write-back; logs=$logs", checks >= 2)
         } finally { runCatching { controller.photos.deleteFile(photo) } }
     }
 

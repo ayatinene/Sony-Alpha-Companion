@@ -139,7 +139,7 @@ class GeotagTest {
 
         provider.callbacks[0].invoke(fix(10f, 5_000L))
         liveCallback.invoke(fix(20f, 6_000L))
-        assertEquals("only the live callback may take effect", 20f, source.freshSnapshot()!!.accuracyMeters, 1e-6)
+        assertEquals("only the live callback may take effect", 20f, source.freshSnapshot()!!.accuracyMeters, 1e-6f)
     }
 
     @Test fun permissionRevokeClearsTheCacheAndStopsSampling() {

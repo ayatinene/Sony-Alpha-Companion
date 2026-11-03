@@ -13,6 +13,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
 import kotlin.coroutines.coroutineContext
+import kotlin.math.roundToLong
 
 /**
  * Pure JSON codec for the import records. Records written before GPS support have no `sourceBytes`
@@ -133,7 +134,9 @@ class PhotoStore(private val context: Context) {
                 exif.setLatLong(snapshot.latitude,snapshot.longitude)
                 exif.setAttribute(ExifInterface.TAG_GPS_DATESTAMP,GeoExif.gpsDate(snapshot.fixTimeMillis))
                 exif.setAttribute(ExifInterface.TAG_GPS_TIMESTAMP,GeoExif.gpsTime(snapshot.fixTimeMillis))
-                exif.setAttribute(ExifInterface.TAG_GPS_H_POSITIONING_ERROR,snapshot.accuracyMeters.toString())
+                // GPSHPositioningError is a URATIONAL-only tag: a bare decimal is silently dropped
+                // because ExifInterface guesses DOUBLE, so the value must be written as a rational.
+                exif.setAttribute(ExifInterface.TAG_GPS_H_POSITIONING_ERROR,gpsRational(snapshot.accuracyMeters))
                 exif.saveAttributes()
                 geotagVerified(work,snapshot)
             } catch(e: CancellationException) { throw e }
@@ -161,6 +164,11 @@ class PhotoStore(private val context: Context) {
     private fun keepOriginal(log: (String)->Unit, reason: String): GeotagResult {
         log("GPS 写入失败，已保留原图：$reason")
         return GeotagResult.KeepOriginal
+    }
+    /** Formats a non-negative rational string for URATIONAL GPS tags such as GPSHPositioningError. */
+    private fun gpsRational(value: Float): String {
+        val numerator = (value.toDouble() * 1000.0).roundToLong().coerceAtLeast(0L)
+        return "$numerator/1000"
     }
     private fun createTemp(): File? = runCatching { File.createTempFile("geotag-",".jpg",context.cacheDir) }.getOrNull()
     private fun copyUriToFile(uri: Uri, file: File, check: () -> Unit) {
