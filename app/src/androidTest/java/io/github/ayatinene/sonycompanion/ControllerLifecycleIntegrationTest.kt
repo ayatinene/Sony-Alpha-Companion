@@ -216,10 +216,12 @@ class ControllerLifecycleIntegrationTest {
                 second.enqueue(MockResponse().setBody(emptyPage()))
                 controller.sessionOverride=CompanionController.SessionOverride(secondHttp,listOf(secondDevice))
                 assertTrue(controller.connect(CameraMode.JPEG))
-                // connect() returns before its coroutine tears the old session down, so the plain
-                // `connected` flag can still belong to the old session. Wait for the new generation to
-                // be published, which happens only after the old transport has been released.
-                waitUntil { controller.state.value.sessionGeneration > generationBefore && controller.state.value.connected }
+                // connect() bumps the generation while tearing the old session down, before the old
+                // transport is actually released, so a generation-only check can pass on that
+                // intermediate state (new generation, stale connected/device). Wait until the new
+                // session itself is published — its device plus connected — which only happens after
+                // disconnect() released the old transport.
+                waitUntil { controller.state.value.sessionGeneration > generationBefore && controller.state.value.connected && controller.state.value.device?.description == secondDevice.description }
                 assertTrue("the old transport must be released by the new connect",firstHttp.isClosed)
                 assertFalse("the new transport must stay open",secondHttp.isClosed)
                 assertTrue("the new session must have its own generation",controller.state.value.sessionGeneration>generationBefore)
