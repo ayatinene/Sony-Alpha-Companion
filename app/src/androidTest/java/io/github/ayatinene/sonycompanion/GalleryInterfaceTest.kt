@@ -380,6 +380,29 @@ class GalleryInterfaceTest {
         choose("SizeDesc"); assertOrder("c","a","b")
     }
 
+    @Test fun foldersFollowTheSelectedSortAheadOfFiles() {
+        // Date-titled folders sort by their title when they carry no date; the undated folder is unknown.
+        val jan=CameraFile("jan","2026-01-01",container=true)
+        val dec=CameraFile("dec","2026-12-31",container=true)
+        val plain=CameraFile("plain","plain",container=true)
+        val photo=jpegFile("p")
+        render(jpeg(listOf(photo,plain,jan,dec)))
+        compose.onNodeWithTag("gallery-layout-toggle").performClick()
+        fun assertOrder(vararg ids:String) {
+            val tops=ids.map { compose.onNodeWithTag("gallery-item-$it").fetchSemanticsNode().boundsInRoot.top }
+            assertTrue("order $ids", tops.zipWithNext().all { (top,bottom) -> top<bottom })
+        }
+        fun choose(name:String) { compose.onNodeWithTag("gallery-sort-menu").performClick(); compose.onNodeWithTag("gallery-sort-$name").performClick() }
+        // Default newest-first keeps folders first, newest date first and the undated folder last.
+        assertOrder("dec","jan","plain","p")
+        choose("Oldest"); assertOrder("jan","dec","plain","p")
+        choose("NameAscending"); assertOrder("jan","dec","plain","p")
+        choose("NameDescending"); assertOrder("plain","dec","jan","p")
+        // Folders have no real size; both size directions keep a stable natural-name ascending order.
+        choose("SizeAsc"); assertOrder("jan","dec","plain","p")
+        choose("SizeDesc"); assertOrder("jan","dec","plain","p")
+    }
+
     @Test fun listInfoOpensTheDetailDialog() {
         render(computer(listOf(rawFile("a")),ScanState(phase=ScanPhase.Done)))
         compose.onNodeWithTag("gallery-layout-toggle").performClick()

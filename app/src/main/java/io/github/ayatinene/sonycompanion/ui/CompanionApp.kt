@@ -1,6 +1,10 @@
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 package io.github.ayatinene.sonycompanion.ui
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
@@ -20,6 +24,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.*
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.ayatinene.sonycompanion.data.*
 import io.github.ayatinene.sonycompanion.BuildConfig
@@ -42,6 +48,14 @@ private fun connectionSubtitle(state:AppState):String=when {
     else->"未连接"
 }
 
+/** Permanently denied permissions can only be fixed in system settings; offer that path instead of
+ *  re-prompting in a loop. */
+private fun openAppSettings(context:Context) {
+    runCatching {
+        context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.fromParts("package",context.packageName,null)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+}
+
 @Composable fun CompanionApp(model:CompanionViewModel,openWifi:()->Unit,requestPermissions:()->Unit) {
     val controller=model.controller
     val state by controller.state.collectAsStateWithLifecycle()
@@ -62,6 +76,60 @@ private fun connectionSubtitle(state:AppState):String=when {
         else if(dark) darkColorScheme(primary=Color(0xFFF4AE78),secondary=Color(0xFF9CC9C5),surface=Color(0xFF111820),background=Color(0xFF111820))
         else lightColorScheme(primary=Color(0xFF914C1D),secondary=Color(0xFF356964),surface=Color(0xFFF8F9FC),background=Color(0xFFF8F9FC))
     val snackbar=remember { SnackbarHostState() }
+    val scope=rememberCoroutineScope()
+    val permissionAskStore=remember(controller) { PrefsPermissionAskStore(controller.prefs) }
+    // One guard for every mode card and the reconnect entry: connect when nothing is needed, otherwise
+    // ask the missing permissions once and auto-continue; a notification denial still connects.
+    val connectWithPermissions=rememberConnectionGuard(
+        onConnect={ mode->if(controller.connect(mode)) nav=nav.requestConnection(mode) },
+        onDenied={ message->scope.launch { snackbar.showSnackbar(message) } },
+        onPermanentDenied={ message->scope.launch {
+            if(snackbar.showSnackbar(message,actionLabel="打开设置")==SnackbarResult.ActionPerformed) openAppSettings(context)
+        } },
+        onNotificationDenied={ message->scope.launch { snackbar.showSnackbar(message) } },
+        askStore=permissionAskStore)
+    // Geotagging lives at app scope, so a permission revoked outside Settings is corrected on resume
+    // instead of leaving the preference on while the switch reads off.
+    var geotagging by rememberSaveable { mutableStateOf(controller.remoteGeotaggingEnabled && controller.locationPermissionGranted()) }
+    var pendingLocation by rememberSaveable { mutableStateOf(false) }
+    var askedLocation by rememberSaveable(stateSaver=permissionSetSaver) { mutableStateOf(permissionAskStore.asked()) }
+    fun applyGeotagging(granted:Boolean) {
+        pendingLocation=false
+        geotagging=granted
+        controller.setRemoteGeotagging(granted)
+        controller.refreshLocationSettings()
+        if(!granted) scope.launch { snackbar.showSnackbar(RemoteGeotaggingPolicy.DENIED_MESSAGE) }
+    }
+    val locationLauncher=rememberPermissionLauncher { results ->
+        if(pendingLocation) applyGeotagging(RemoteGeotaggingPolicy.anyGranted(results) || controller.locationPermissionGranted())
+    }
+    fun canAskLocationAgain(permission:String):Boolean =
+        context.findActivityOrNull()?.shouldShowRequestPermissionRationale(permission)==true
+    fun enableGeotagging() {
+        val plan=planPermissionRequest(RemoteGeotaggingPolicy.PERMISSIONS,emptyList(),{ controller.locationPermissionGranted() },askedLocation,::canAskLocationAgain)
+        when {
+            controller.locationPermissionGranted() -> applyGeotagging(true)
+            plan.blockedPermanently -> scope.launch {
+                if(snackbar.showSnackbar(RemoteGeotaggingPolicy.PERMANENT_MESSAGE,actionLabel="打开设置")==SnackbarResult.ActionPerformed) openAppSettings(context)
+            }
+            else -> {
+                askedLocation=askedLocation+plan.request
+                permissionAskStore.markAsked(plan.request)
+                pendingLocation=true
+                locationLauncher.launch(plan.request)
+            }
+        }
+    }
+    fun disableGeotagging() { geotagging=false;pendingLocation=false;controller.setRemoteGeotagging(false) }
+    fun reconcileRevokedGeotagging() {
+        if(controller.remoteGeotaggingEnabled && !controller.locationPermissionGranted()) {
+            geotagging=false
+            controller.setRemoteGeotagging(false)
+            scope.launch { snackbar.showSnackbar(RemoteGeotaggingPolicy.REVOKED_MESSAGE) }
+        }
+    }
+    LaunchedEffect(Unit) { reconcileRevokedGeotagging() }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { reconcileRevokedGeotagging() }
     LaunchedEffect(state.error) { state.error?.let { snackbar.showSnackbar(it,duration=SnackbarDuration.Long); controller.clearError() } }
     LaunchedEffect(state.connected,state.connecting,state.mode) { nav=nav.observe(state.connected,state.connecting,state.mode) }
     MaterialTheme(colorScheme=colors,shapes=Shapes(small=shape,medium=shape,large=RoundedCornerShape(16.dp))) {
@@ -86,10 +154,10 @@ private fun connectionSubtitle(state:AppState):String=when {
                     when(shown) {
                         Destination.Home,Destination.Capture->Home(state,controller,
                             onOpenWorkspace={ nav=nav.copy(destination=workspaceFor(state.mode),entryTarget=null) },
-                            onConnect={ mode->if(controller.connect(mode)) nav=nav.requestConnection(mode) },permissions=requestPermissions)
+                            onConnect=connectWithPermissions,permissions=requestPermissions)
                         Destination.Gallery->CameraGallery(state,controller.galleryActions())
                         Destination.Local->LocalLibraryScreen(state,controller)
-                        Destination.Settings->SettingsPage(state,controller,theme,dynamic,{theme=it;controller.prefs.edit().putString("theme",it).apply()}, {dynamic=it;controller.prefs.edit().putBoolean("dynamic",it).apply()},requestPermissions)
+                        Destination.Settings->SettingsPage(state,controller,theme,dynamic,{theme=it;controller.prefs.edit().putString("theme",it).apply()}, {dynamic=it;controller.prefs.edit().putBoolean("dynamic",it).apply()},requestPermissions,geotagging,::enableGeotagging,::disableGeotagging)
                     }
                 }
             }
@@ -121,7 +189,7 @@ private fun connectionSubtitle(state:AppState):String=when {
                 } }
             }
         }
-        item { TextButton(onClick=permissions) { Icon(Icons.Outlined.Security,null); Spacer(Modifier.width(8.dp)); Text("附近设备与通知权限") } }
+        item { TextButton(onClick=permissions) { Icon(Icons.Outlined.Security,null); Spacer(Modifier.width(8.dp)); Text("权限设置") } }
         if(state.local.isNotEmpty()) item { Text("最近导入：${state.local.first().name}",style=MaterialTheme.typography.bodyMedium) }
     }
 }
@@ -148,13 +216,14 @@ private fun connectionSubtitle(state:AppState):String=when {
     }
 }
 
-@Composable private fun SettingsPage(state:AppState,c:CompanionController,theme:String,dynamic:Boolean,setTheme:(String)->Unit,setDynamic:(Boolean)->Unit,permissions:()->Unit) {
+@Composable private fun SettingsPage(state:AppState,c:CompanionController,theme:String,dynamic:Boolean,setTheme:(String)->Unit,setDynamic:(Boolean)->Unit,permissions:()->Unit,geotagging:Boolean,onEnableGeotagging:()->Unit,onDisableGeotagging:()->Unit) {
     val context=LocalContext.current
     val export=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")){uri->if(uri!=null)c.exportDiagnostics(uri)}
     var description by remember { mutableStateOf(c.prefs.getString("description","").orEmpty()) }
     var host by remember { mutableStateOf(c.prefs.getString("computerHost","").orEmpty()) }
     var guid by remember { mutableStateOf(c.prefs.getString("guid","").orEmpty()) }
     var sonySleep by remember { mutableStateOf(c.prefs.getBoolean(SONY_SLEEP_ON_DISCONNECT,false)) }
+    var sensorRotation by remember { mutableStateOf(c.prefs.getBoolean(REMOTE_SENSOR_ROTATION,REMOTE_SENSOR_ROTATION_DEFAULT)) }
     var saved by remember { mutableStateOf(false) }
     var logLevel by remember { mutableStateOf(c.journal.minimum) }
     var logMenu by remember { mutableStateOf(false) }
@@ -180,7 +249,11 @@ private fun connectionSubtitle(state:AppState):String=when {
         item { OutlinedButton(onClick={usbInfo=c.usbStatus();registerUsb=true},enabled=!state.connected&&!state.busy&&!state.transferring,shape=shape) { Icon(Icons.Outlined.Usb,null);Spacer(Modifier.width(8.dp));Text("USB OTG 登记接收端 · 实验性") } }
         item { Text("相机 USB 连接选择“海量存储”，通过数据线和 OTG 连接手机后登记。成功后拔下 USB，再连接 Wi-Fi 使用原文件传输。",style=MaterialTheme.typography.bodySmall) }
         item { SonySleepSetting(sonySleep){ enabled->sonySleep=enabled;c.prefs.edit().putBoolean(SONY_SLEEP_ON_DISCONNECT,enabled).apply() } }
-        item { TextButton(onClick=permissions){Text("申请附近设备与通知权限")} }
+        item { TextButton(onClick=permissions){Text("权限设置")} }
+        item { HorizontalDivider() }
+        item { Text("遥控拍摄",style=MaterialTheme.typography.titleMedium) }
+        item { RemoteSensorRotationSetting(sensorRotation){ enabled->sensorRotation=enabled;c.prefs.edit().putBoolean(REMOTE_SENSOR_ROTATION,enabled).apply() } }
+        item { RemoteGeotaggingSetting(geotagging,onEnableRequest=onEnableGeotagging,onDisable=onDisableGeotagging) }
         item { HorizontalDivider() }
         item { Text("存储与诊断",style=MaterialTheme.typography.titleMedium) }
         item { Text("照片保存在 DCIM/AlphaCompanion。\n预览不会自动保存，点击下载才保存到系统图库。\n相机图库中未完成的下载可在重连后继续，重试会从头下载。\n本地图库可删除文件，或仅清除导入记录。",style=MaterialTheme.typography.bodySmall) }

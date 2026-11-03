@@ -38,7 +38,12 @@ fun matchCurrentFile(candidate: CameraFile, current: List<CameraFile>): CameraFi
     it.id==candidate.id && it.parent==candidate.parent && it.name==candidate.name && it.date==candidate.date && it.size==candidate.size
 }.singleOrNull()
 data class LocalPhoto(val uri: String, val name: String, val bytes: Long, val added: Long,
-    val origin: String, val sourceId: String, val pairKey: String = localPairKey(name,sourceId))
+    val origin: String, val sourceId: String, val pairKey: String = localPairKey(name,sourceId),
+    /** On-disk size. [sourceBytes] is the received size used for dedup; older records default it here. */
+    val sourceBytes: Long = bytes)
+/** Dedup match by source identity and received size ([LocalPhoto.sourceBytes]), not the on-disk size. */
+fun matchesSource(photo: LocalPhoto, sourceId: String, expected: Long): Boolean =
+    photo.sourceId==sourceId && (expected<=0 || photo.sourceBytes==expected)
 fun pairKey(name: String) = name.substringBeforeLast('.').uppercase(Locale.ROOT)
 fun localPairKey(name: String, source: String): String {
     val parts=source.split('|')
@@ -46,7 +51,9 @@ fun localPairKey(name: String, source: String): String {
     return "$directory|${pairKey(name)}"
 }
 data class QueueItem(val file: CameraFile, val state: String = "等待", val received: Long = 0,
-    val total: Long = file.size, val error: String? = null)
+    val total: Long = file.size, val error: String? = null,
+    /** GPS snapshot captured for this photo at capture time. Never persisted: restored entries have no fix. */
+    val geo: GeoSnapshot? = null)
 enum class ScanPhase { Idle, Scanning, Done, Failed }
 /** Progress of the COMPUTER (PTP) listing scan. `paused` is true while the scan is held back, either
  * by the user or by an in-flight download; the user's explicit pause is never lifted by a download

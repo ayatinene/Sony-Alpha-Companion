@@ -5,7 +5,9 @@ import io.github.ayatinene.sonycompanion.data.CameraMode
 import io.github.ayatinene.sonycompanion.data.ScanPhase
 import io.github.ayatinene.sonycompanion.data.ScanState
 import io.github.ayatinene.sonycompanion.data.captureTimeMillis
+import java.time.DateTimeException
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -104,13 +106,55 @@ private fun naturalNameThenId(a: CameraFile, b: CameraFile): Int {
     return a.id.compareTo(b.id)
 }
 
-/** Missing capture times sort last in both directions. */
-private fun compareCaptureTime(a: Long?, b: Long?, newestFirst: Boolean): Int {
-    if (a == null && b == null) return 0
-    if (a == null) return 1
-    if (b == null) return -1
-    val byTime = a.compareTo(b)
-    return if (newestFirst) -byTime else byTime
+/** Reverses only the natural name comparison; equal names keep the stable ascending tie-break. */
+private fun naturalNameDescendingThenId(a: CameraFile, b: CameraFile): Int {
+    val byNatural = naturalCompare(a.name, b.name)
+    if (byNatural != 0) return -byNatural
+    return naturalNameThenId(a, b)
+}
+
+/** The only folder-name form treated as a date: the confirmed camera "Date" title `yyyy-MM-dd`. */
+private val folderDateFormatter = DateTimeFormatter.ISO_LOCAL_DATE
+
+/**
+ * Strict date-only parse of a "Date" folder title. Only the confirmed `yyyy-MM-dd` shape is accepted,
+ * so a bare digit run, a camera directory such as `100MSDCF` or any other name is unknown and never
+ * invents a time. Impossible days/months are rejected by strict resolution.
+ */
+internal fun folderDateMillis(name: String, zone: ZoneId = ZoneId.systemDefault()): Long? {
+    val text = name.trim()
+    if (text.length != 10) return null
+    return try {
+        LocalDate.parse(text, folderDateFormatter).atStartOfDay(zone).toInstant().toEpochMilli()
+    } catch (_: DateTimeException) { null }
+}
+
+/**
+ * Sort key for a time sort: the real capture time when the date parses, else the confirmed date title
+ * of a folder whose own date is blank. A non-blank but unreadable date is never replaced by a name.
+ */
+private fun sortTime(file: CameraFile, zone: ZoneId): Long? =
+    captureTimeMillis(file.date, zone)
+        ?: if (file.container && file.date.isBlank()) folderDateMillis(file.name, zone) else null
+
+/**
+ * Time sort shared by folders and files. Entries with an unknown time go last in both directions.
+ * Two unknown folders fall back to the natural name in the chosen direction, so the default
+ * newest-first keeps the old descending behaviour; unknown files keep the stable ascending fallback
+ * they had before, and simultaneous known times keep that same ascending tie-break.
+ */
+private fun compareTime(a: CameraFile, b: CameraFile, times: Map<CameraFile, Long?>, newestFirst: Boolean): Int {
+    val timeA = times[a]
+    val timeB = times[b]
+    if (timeA == null || timeB == null) {
+        if (timeA == null && timeB == null) {
+            return if (a.container && newestFirst) naturalNameDescendingThenId(a, b) else naturalNameThenId(a, b)
+        }
+        return if (timeA == null) 1 else -1
+    }
+    val byTime = timeA.compareTo(timeB)
+    if (byTime != 0) return if (newestFirst) -byTime else byTime
+    return naturalNameThenId(a, b)
 }
 
 /** Unknown sizes (<= 0) sort last in both directions. */
@@ -123,24 +167,27 @@ private fun compareFileSize(a: Long, b: Long, ascending: Boolean): Int {
     return if (ascending) bySize else -bySize
 }
 
-/** Folders first; only the chosen mode's key is resolved, once per file. */
+/**
+ * Folders first, then by the selected key; the same key applies inside the folder group too, so
+ * sorting the camera's "Date" folders no longer ignores the setting. Folders have no real size, so
+ * both size directions keep a stable natural-name ascending order instead of a fake size 0.
+ */
 fun gallerySorted(files: List<CameraFile>, sort: GallerySort): List<CameraFile> {
+    val zone = ZoneId.systemDefault()
     val times: Map<CameraFile, Long?> =
-        if (sort == GallerySort.Newest || sort == GallerySort.Oldest) files.associateWith { captureTimeMillis(it.date) } else emptyMap()
+        if (sort == GallerySort.Newest || sort == GallerySort.Oldest) files.associateWith { sortTime(it, zone) } else emptyMap()
     val sizes: Map<CameraFile, Long> =
         if (sort == GallerySort.SizeAsc || sort == GallerySort.SizeDesc) files.associateWith { effectiveFileSize(it) } else emptyMap()
     return files.sortedWith(Comparator<CameraFile> { a, b ->
         if (a.container != b.container) return@Comparator if (a.container) -1 else 1
-        if (a.container) return@Comparator naturalNameThenId(a, b)
         when (sort) {
             GallerySort.Newest, GallerySort.Oldest ->
-                compareCaptureTime(times[a], times[b], sort == GallerySort.Newest)
-                    .takeIf { it != 0 } ?: naturalNameThenId(a, b)
+                compareTime(a, b, times, sort == GallerySort.Newest)
             GallerySort.NameAscending -> naturalNameThenId(a, b)
-            GallerySort.NameDescending ->
-                naturalCompare(a.name, b.name).let { if (it != 0) -it else naturalNameThenId(a, b) }
+            GallerySort.NameDescending -> naturalNameDescendingThenId(a, b)
             GallerySort.SizeAsc, GallerySort.SizeDesc ->
-                compareFileSize(sizes[a] ?: 0L, sizes[b] ?: 0L, sort == GallerySort.SizeAsc)
+                if (a.container) naturalNameThenId(a, b)
+                else compareFileSize(sizes[a] ?: 0L, sizes[b] ?: 0L, sort == GallerySort.SizeAsc)
                     .takeIf { it != 0 } ?: naturalNameThenId(a, b)
         }
     })

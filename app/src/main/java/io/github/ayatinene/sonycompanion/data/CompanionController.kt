@@ -27,9 +27,12 @@ class CompanionController(private val context: Context) {
         private const val INIT_FINISH_TIMEOUT_MILLIS = 4_000L
         private const val SESSION_END_TIMEOUT_MILLIS = 4_000L
         private const val SONY_SLEEP_PREF = "sonySleepOnDisconnect"
+        private const val REMOTE_GEOTAGGING_PREF = "remoteGeotagging"
     }
     val prefs = context.getSharedPreferences("settings",Context.MODE_PRIVATE)
     val photos = PhotoStore(context)
+    /** Samples the platform provider only while foregrounded in a REMOTE session. */
+    var locationSource: LocationSource = GeotagSource(PlatformLocationFixProvider(context))
     private val queues=TransferQueueStore(java.io.File(context.filesDir,"transfer-queues.json"))
     private val previews=PreviewCache(java.io.File(context.cacheDir,"previews"))
     val journal = DiagnosticLog(java.io.File(context.filesDir,"logs")).apply {
@@ -87,6 +90,9 @@ class CompanionController(private val context: Context) {
     private val shutter = Mutex()
     private val thumbs = LruCache<String,Bitmap>(48)
     private val importedUrls = linkedSetOf<String>()
+    /** Freezes the per-capture GPS decision (including null) and defers camera-body postviews while an
+     *  RPC capture is unresolved, so an event URL can never steal or inherit a capture's fix. */
+    private val captureBinding = CaptureGeoBinding()
     private val protocolResponses = Collections.synchronizedMap(linkedMapOf<String,String>())
     private var selectedNetwork: Network? = null
     private var lastUsbDescription = ""
@@ -102,6 +108,10 @@ class CompanionController(private val context: Context) {
                 }
         }
         log("应用启动 version=${BuildConfig.VERSION_NAME} sdk=${android.os.Build.VERSION.SDK_INT} device=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}",tag="APP")
+        // Foreground sampling follows the live session: it stops on disconnect, on hiding and on disable.
+        scope.launch {
+            state.map { it.mode to it.connected }.distinctUntilChanged().collect { applyLocationSampling() }
+        }
         cm.registerNetworkCallback(NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(),object: ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 log("Wi-Fi 可用 network=$network",LogLevel.DEBUG,"CONNECT")
@@ -495,7 +505,9 @@ class CompanionController(private val context: Context) {
                     val (status,urls)=camera.events(); failures=0
                     // Never publish an old session's event result or enqueue its postviews into a newer one.
                     whenGeneration(gen) { if(remote===camera) update { copy(remote=status) } }
-                    urls.forEach { importPostview(it,gen) }
+                    // While an RPC capture is in flight a body postview may actually belong to it, so it is
+                    // deferred for the RPC to claim; otherwise it is an independent capture and stays noGPS.
+                    urls.forEach { url -> if(!captureBinding.defer(gen,url)) importPostview(url,gen) }
                 } catch(e: CancellationException) { throw e }
                 catch(e: Exception) {
                     failures++; log("状态查询失败 attempt=$failures：${e.message}",LogLevel.WARN,"EVENT",e)
@@ -558,7 +570,28 @@ class CompanionController(private val context: Context) {
             val jobs=stopMonitoring()
             monitoringStop=scope.launch { jobs.joinAll() }
         }
+        applyLocationSampling()
     }
+    /** Opt-in switch persisted in settings. */
+    val remoteGeotaggingEnabled: Boolean get() = prefs.getBoolean(REMOTE_GEOTAGGING_PREF,false)
+    fun locationPermissionGranted(): Boolean = locationSource.hasPermission()
+    fun setRemoteGeotagging(enabled: Boolean) {
+        prefs.edit().putBoolean(REMOTE_GEOTAGGING_PREF,enabled).apply()
+        log("遥控地理标记 ${if(enabled) "开启" else "关闭"}",LogLevel.INFO,"GEOTAG")
+        applyLocationSampling()
+    }
+    /** Re-reads the pref and permission after the runtime permission dialog returns. */
+    fun refreshLocationSettings() = applyLocationSampling()
+    /** Foreground sampling runs only for a visible, connected REMOTE session with the opt-in on. */
+    private fun applyLocationSampling() {
+        val snapshot=state.value
+        val active=geotagAllowed(snapshot.mode,remoteGeotaggingEnabled,locationSource.hasPermission()) && visible && snapshot.connected
+        if(active) locationSource.start() else locationSource.stop()
+    }
+    /** A fix for the current REMOTE session, or null when the opt-in/permission gate fails. */
+    private fun currentGeoSnapshot(): GeoSnapshot? =
+        if(!geotagAllowed(state.value.mode,remoteGeotaggingEnabled,locationSource.hasPermission())) null
+        else locationSource.freshSnapshot()
     /** Detaches the live session. Only pure field capture, generation bump and state clearing happen
      * under the identity lock; every actual abort/close/cancel runs outside it, so no synchronous
      * callback can run while the lock is held. A forced detach closes the transports before cancelling
@@ -580,6 +613,7 @@ class CompanionController(private val context: Context) {
             if(!graceful) oldRemote?.disallowCleanup()
             userScanPaused=false
             computer=null; remote=null; smartphone=null; http=null; selectedNetwork=null
+            captureBinding.clear()
             update { copy(connected=false,connecting=false,busy=false,transferring=false,scan=ScanState()) }
             DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,monitoring,monitoringStopJob,ownConnection,attempt,actions,graceful)
         }
@@ -696,13 +730,28 @@ class CompanionController(private val context: Context) {
         if(!ownsCamera(camera,gen)) return
         log("请求拍照",tag="CAPTURE")
         if(!ownsCamera(camera,gen)) return
-        val urls=camera.takePicture()
+        // Freeze the fix for this capture (null included); never block the shutter on location.
+        val geo=currentGeoSnapshot()
+        if(remoteGeotaggingEnabled && locationSource.hasPermission()) locationSource.requestRefresh()
+        val token=captureBinding.begin(gen,geo)
+        val urls=try {
+            camera.takePicture()
+        } catch(e: CancellationException) {
+            captureBinding.abort(token); throw e
+        } catch(e: Exception) {
+            captureBinding.complete(token,emptyList()).forEach { importPostview(it,gen) }
+            throw e
+        }
         log("拍照返回 previews=${urls.size}",tag="CAPTURE")
+        // complete() binds the frozen fix to the RPC URLs first; import those before flushing any
+        // deferred body postviews so a shared URL is claimed by the RPC capture, not as noGPS.
+        val deferred=captureBinding.complete(token,urls)
         urls.forEach { importPostview(it,gen) }
+        deferred.forEach { importPostview(it,gen) }
         if(urls.isEmpty()) whenGeneration(gen) { update { copy(message="快门请求已接受，未返回 JPEG 预览；请检查相机") } }
     }
-    /** Dedup and enqueue under the same identity lock, so a stale postview cannot mutate the import
-     * set or enqueue into a newer session. */
+    /** Dedup and enqueue under the identity lock so a stale postview cannot mutate a newer session. The
+     * fix is only the one frozen for this capture; an event postview is never bound to a current fix. */
     private fun importPostview(url: String, gen: Long) {
         val name=runCatching { java.net.URI(url).path.substringAfterLast('/') }.getOrDefault("").takeIf { it.endsWith(".jpg",true) }
             ?: "Remote_${System.currentTimeMillis()}.JPG"
@@ -711,7 +760,10 @@ class CompanionController(private val context: Context) {
             if(url in importedUrls) return@locked
             importedUrls += url
             while(importedUrls.size>500) importedUrls.remove(importedUrls.first())
-            enqueue(listOf(CameraFile(url,name,listOf(Resource(url)),thumbnail=url)),gen)
+            val bound=captureBinding.geoFor(gen,url)
+            val file=CameraFile(url,name,listOf(Resource(url)),thumbnail=url)
+            enqueue(listOf(file),gen,geo=if(bound!=null) mapOf(file.id to bound) else emptyMap())
+            if(bound!=null) log("遥控照片附带定位 ${name} accuracy=${bound.accuracyMeters}m",LogLevel.DEBUG,"GEOTAG")
         }
     }
     fun interval(count: Int, seconds: Int) {
@@ -808,7 +860,8 @@ class CompanionController(private val context: Context) {
             return@withContext null
         } catch(e: CancellationException) { throw e } catch(_: Exception) { null }
     } } }
-    fun enqueue(incoming:List<CameraFile>, expectedGeneration: Long = state.value.sessionGeneration) {
+    fun enqueue(incoming:List<CameraFile>, expectedGeneration: Long = state.value.sessionGeneration,
+        geo: Map<String,GeoSnapshot> = emptyMap()) {
         val snapshot=state.value
         if(!snapshot.connected || snapshot.sessionGeneration!=expectedGeneration) return
         identity.locked {
@@ -830,7 +883,7 @@ class CompanionController(private val context: Context) {
                         verified.forEach { file ->
                             if(queue.none { it.file.id==file.id && it.state in listOf("等待","传输中") }) {
                                 queue.removeAll { it.file.id==file.id && it.state !in listOf("等待","传输中") }
-                                queue+=QueueItem(file)
+                                queue+=QueueItem(file,geo=geo[file.id])
                             }
                         }
                         copy(queue=queue)
@@ -846,6 +899,7 @@ class CompanionController(private val context: Context) {
         if(!snapshot.connected || snapshot.queueScope==null) return
         if(snapshot.queue.none { it.state=="等待" }) return
         val sessionScope=snapshot.queueScope
+        val sessionGeneration=snapshot.sessionGeneration
         val sessionHttp=http
         val sessionComputer=computer
         val token=identity.nextQueueRun()
@@ -897,14 +951,17 @@ class CompanionController(private val context: Context) {
                         val name=if(!isRaw && file.name.endsWith(".arw",true)) file.name.substringBeforeLast('.')+".JPG" else file.name
                         val source=transferSource(sessionScope,file,resource)
                         val expected=resource?.size?:file.size
-                        val existing=photos.list().firstOrNull { it.sourceId==source && (expected<=0||it.bytes==expected) && photos.exists(it) }
+                        // Dedup on the received size, not the on-disk size a GPS edit may change.
+                        val existing=photos.list().firstOrNull { matchesSource(it,source,expected) && photos.exists(it) }
                         log("开始 ${file.name} expected=$expected resource=${resource?.url ?: file.id}",tag="TRANSFER")
                         if(existing==null) {
                             // Only repeat safe file GETs. Every failed attempt removes its pending file.
                             val attempts=if(file.handle==null)3 else 1
                             for(attempt in 1..attempts) {
                                 try {
-                                    photos.import(name,isRaw,expected,source,state.value.mode?.title.orEmpty()) { out ->
+                                    photos.import(name,isRaw,expected,source,state.value.mode?.title.orEmpty(),geotag=item.geo,
+                                        canWriteGeotag={ geotagAllowed(state.value.mode,remoteGeotaggingEnabled,locationSource.hasPermission()) && state.value.sessionGeneration==sessionGeneration },
+                                        log={ message -> log(message,LogLevel.WARN,"GEOTAG") }) { out ->
                                         if(file.handle!=null) requireNotNull(sessionComputer).download(file,out,::progress)
                                         else requireNotNull(sessionHttp).stream(requireNotNull(resource).url) { response ->
                                             val body=requireNotNull(response.body)

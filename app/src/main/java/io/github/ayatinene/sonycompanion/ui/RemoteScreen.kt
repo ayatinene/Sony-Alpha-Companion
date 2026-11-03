@@ -56,6 +56,14 @@ data class RemoteActions(
     val image by c.frame.collectAsStateWithLifecycle()
     var grid by rememberSaveable { mutableStateOf(false) }
     var advanced by rememberSaveable { mutableStateOf(false) }
+    // Only the production capture page drives hardware rotation; RemoteWorkspace stays injectable so
+    // its tests can keep exercising explicit portrait/landscape sizes. The host is keyed on the
+    // Activity so recomposition never rebuilds it (which would restart the effect every frame).
+    val view=LocalView.current
+    val activity=remember(view) { view.context.findActivityOrNull() }
+    val orientationHost=remember(activity) { activity?.let(::ActivityOrientationHost) }
+    val sensorRotation=remember { c.prefs.getBoolean(REMOTE_SENSOR_ROTATION,REMOTE_SENSOR_ROTATION_DEFAULT) }
+    if(orientationHost!=null) RemoteSensorOrientation(sensorRotation,orientationHost)
     val insets=rememberWorkspaceInsets()
     RemoteWorkspace(state,image,grid,insets,RemoteActions(
         onBack=onBack,onDisconnect=c::endSession,onToggleGrid={grid=!grid},onTools={advanced=true},
