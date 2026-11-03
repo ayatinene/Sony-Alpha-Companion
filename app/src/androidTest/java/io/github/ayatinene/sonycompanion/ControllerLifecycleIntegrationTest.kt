@@ -7,13 +7,13 @@ import io.github.ayatinene.sonycompanion.network.CameraHttp
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.util.concurrent.TimeUnit
 
 /**
  * Drives the real [CompanionController] against local servers through the [CompanionController.SessionOverride]
@@ -169,7 +169,9 @@ class ControllerLifecycleIntegrationTest {
             controller.setVisible(false)
             val http=CameraHttp()
             enqueueRemoteInitialize(server)
-            server.enqueue(MockResponse().setBody("""{"result":[[]]}""").setBodyDelay(30,TimeUnit.SECONDS)) // capture hangs
+            // A no-response socket keeps the capture blocked without pinning a server thread for 30s,
+            // so closing the transport (and the server) unblocks it instead of hanging shutdown.
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)) // capture hangs
             controller.sessionOverride=CompanionController.SessionOverride(http,listOf(remoteDevice(server)))
             assertTrue(controller.connect(CameraMode.REMOTE))
             waitUntil { controller.state.value.connected }
@@ -185,7 +187,7 @@ class ControllerLifecycleIntegrationTest {
         MockWebServer().use { server ->
             val http=CameraHttp()
             server.enqueue(MockResponse().setBody(emptyPage()))  // initialize browse
-            server.enqueue(MockResponse().setBody(emptyPage()).setBodyDelay(30,TimeUnit.SECONDS)) // hanging browse
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)) // hanging browse
             controller.sessionOverride=CompanionController.SessionOverride(http,listOf(jpegDevice(server,false)))
             assertTrue(controller.connect(CameraMode.JPEG))
             waitUntil { controller.state.value.connected }
@@ -214,7 +216,10 @@ class ControllerLifecycleIntegrationTest {
                 second.enqueue(MockResponse().setBody(emptyPage()))
                 controller.sessionOverride=CompanionController.SessionOverride(secondHttp,listOf(secondDevice))
                 assertTrue(controller.connect(CameraMode.JPEG))
-                waitUntil { controller.state.value.connected }
+                // connect() returns before its coroutine tears the old session down, so the plain
+                // `connected` flag can still belong to the old session. Wait for the new generation to
+                // be published, which happens only after the old transport has been released.
+                waitUntil { controller.state.value.sessionGeneration > generationBefore && controller.state.value.connected }
                 assertTrue("the old transport must be released by the new connect",firstHttp.isClosed)
                 assertFalse("the new transport must stay open",secondHttp.isClosed)
                 assertTrue("the new session must have its own generation",controller.state.value.sessionGeneration>generationBefore)

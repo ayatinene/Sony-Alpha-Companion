@@ -31,7 +31,9 @@ class SonySleepSettingTest {
         var checked by mutableStateOf(false)
         compose.setContent { MaterialTheme { SonySleepSetting(checked) { checked=it } } }
         compose.onNodeWithTag(tag).assertIsOff()
-        compose.onNodeWithTag(switchTag,useUnmergedTree=true).assertIsOff()
+        // The row owns the toggle semantics; the switch is a decorative, non-interactive reflection of
+        // the same hoisted state (onCheckedChange=null), so it exposes no ToggleableState of its own.
+        compose.onNodeWithTag(switchTag,useUnmergedTree=true).assertIsDisplayed()
         compose.runOnIdle { assertFalse(checked) }
     }
 
@@ -54,7 +56,8 @@ class SonySleepSettingTest {
         compose.onNodeWithTag(tag).assertIsOff()
         compose.runOnIdle { checked=true }
         compose.onNodeWithTag(tag).assertIsOn()
-        compose.onNodeWithTag(switchTag,useUnmergedTree=true).assertIsOn()
+        // Same as above: the switch mirrors the row's state but has no independent toggle semantics.
+        compose.onNodeWithTag(switchTag,useUnmergedTree=true).assertIsDisplayed()
         compose.runOnIdle { checked=false }
         compose.onNodeWithTag(tag).assertIsOff()
     }
