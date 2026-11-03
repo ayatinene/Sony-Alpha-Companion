@@ -20,12 +20,17 @@ class PlatformLocationFixProvider(private val context: Context) : LocationFixPro
     override fun hasPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
         ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-    override fun lastKnown(): GeoSnapshot? = runCatching {
-        val locationManager = manager ?: return@runCatching null
-        locationManager.getProviders(true).mapNotNull { provider ->
-            runCatching { locationManager.getLastKnownLocation(provider) }.getOrNull()
-        }.mapNotNull(::snapshot).maxByOrNull { it.fixElapsedNanos }
-    }.getOrNull()
+    override fun lastKnown(): GeoSnapshot? {
+        if (!hasPermission()) return null
+        val locationManager = manager ?: return null
+        return try {
+            locationManager.getProviders(true).mapNotNull { provider ->
+                try { locationManager.getLastKnownLocation(provider) }
+                catch (_: SecurityException) { null }
+                catch (_: IllegalArgumentException) { null }
+            }.mapNotNull(::snapshot).maxByOrNull { it.fixElapsedNanos }
+        } catch (_: SecurityException) { null }
+    }
     override fun start(onFix: (GeoSnapshot) -> Unit): LocationRegistration? {
         val locationManager = manager ?: return null
         if (!hasPermission()) return null
@@ -39,10 +44,11 @@ class PlatformLocationFixProvider(private val context: Context) : LocationFixPro
         var registered = 0
         runCatching {
             locationManager.getProviders(true).forEach { provider ->
-                val ok = runCatching {
+                val ok = try {
                     locationManager.requestLocationUpdates(provider, 1_000L, 0f, listener, Looper.getMainLooper())
                     true
-                }.getOrDefault(false)
+                } catch (_: SecurityException) { false }
+                catch (_: IllegalArgumentException) { false }
                 if (ok) registered++
             }
         }
