@@ -34,7 +34,7 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
         val json = JSONObject(http.post(endpoint,request.toString()))
         val error = json.optJSONArray("error")
         if (error != null) throw CameraApiError(error.optInt(0,-1),error.optString(1))
-        return json.optJSONArray("result") ?: error("相机返回缺少 result：$method")
+        return sonyRpcResult(json, method) ?: error("相机返回缺少 result：$method")
     }
     suspend fun initialize(): RemoteState {
         refresh()
@@ -197,7 +197,13 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
             val rows = types.optJSONArray(0)?.takeIf { it.opt(0) is JSONArray } ?: types
             for (i in 0 until rows.length()) {
                 val row = rows.optJSONArray(i) ?: continue
-                if (row.optString(0) == method) return version
+                if (row.optString(0) == method) {
+                    // Sony returns the method's declared version in column 4, which may be
+                    // lower than the getMethodTypes query version (e.g. queried 1.4,
+                    // setCameraFunction declared 1.0 on an actual ILCE-7RM2).
+                    val declared = row.optString(3).trim()
+                    return declared.takeIf { it in versions } ?: version
+                }
             }
         }
         return null

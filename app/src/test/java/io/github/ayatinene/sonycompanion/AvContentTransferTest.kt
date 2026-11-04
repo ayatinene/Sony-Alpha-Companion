@@ -48,7 +48,7 @@ class AvContentTransferTest {
     ): (JSONObject) -> String? = { req ->
         when (req.getString("method")) {
             "getVersions" -> ok(versions, req.optInt("id"))
-            "getMethodTypes" -> ok(rowsJson(rows[req.getJSONArray("params").getString(0)].orEmpty()), req.optInt("id"))
+            "getMethodTypes" -> """{"results":${rowsJson(rows[req.getJSONArray("params").getString(0)].orEmpty())},"id":${req.optInt("id")}}"""
             else -> null
         }
     }

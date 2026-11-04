@@ -20,6 +20,18 @@ class TransferQueueStoreTest {
         assertNotEquals(device(a).cameraId,device(b).cameraId)
         assertNotEquals(queueScope(device(a),CameraMode.JPEG),queueScope(device(a),CameraMode.COMPUTER))
     }
+    @Test fun sonyLegacyUdnIsStableAndDistinctAcrossCameras() {
+        val sonyA = "uuid:000000001000-1010-8000-ABCDEF012345"
+        val sonyB = "uuid:000000001000-1010-8000-ABCDEF012346"
+        val canonical = "uuid:00000000-1000-1010-8000-ABCDEF012345"
+        val expected = "udn:00000000-1000-1010-8000-abcdef012345"
+        assertEquals(expected, device(sonyA).cameraId)
+        assertEquals(expected, device(canonical).cameraId)
+        assertEquals(device(sonyA).cameraId, device(sonyA, "new-host").cameraId)
+        assertNotEquals(device(sonyA).cameraId, device(sonyB).cameraId)
+        assertEquals(avContentQueueScope(device(sonyA)), avContentQueueScope(device(canonical)))
+        assertNull(device("uuid:000000001000-1010-8000-000000000000").cameraId)
+    }
     @Test fun rejectsPlaceholderIdentityAndUsesPtpSerialWhenAvailable() {
         assertNull(stableCameraId("uuid:00000000-0000-0000-0000-000000000000","000000","Sony"))
         assertNull(stableCameraId("","unknown","Sony"))

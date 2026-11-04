@@ -23,13 +23,14 @@ class RemoteFunctionCapabilityTest {
                     val result=when(json.getString("method")) {
                         "getAvailableApiList" -> "[[\"getCameraFunction\"]]"
                         "getVersions" -> "[[\"1.0\",\"1.3\"]]"
-                        "getMethodTypes" -> "[[\"setCameraFunction\",\"int\",[],\"1.0\"]]"
+                        "getMethodTypes" -> "[[\"setCameraFunction\",[\"string\"],[\"int\"],\"1.0\"]]"
                         "getSupportedCameraFunction" -> "[[\"Contents Transfer\",\"Remote Shooting\"]]"
                         "getCameraFunction" -> "[\"Remote Shooting\"]"
                         "setCameraFunction" -> "[0]"
                         else -> error("Unexpected method: $json")
                     }
-                    return MockResponse().setBody("{\"result\":$result}")
+                    val key = if (json.getString("method") == "getMethodTypes") "results" else "result"
+                    return MockResponse().setBody("{\"$key\":$result}")
                 }
             }
             val camera=RemoteCamera(server.url("/sony/camera").toString(),http)
@@ -38,7 +39,7 @@ class RemoteFunctionCapabilityTest {
             assertEquals(RemoteFunction.REMOTE_SHOOTING,camera.cameraFunction())
             camera.setCameraFunction(RemoteFunction.CONTENTS_TRANSFER)
             val switch=requests.single { it.getString("method")=="setCameraFunction" }
-            assertEquals("1.3",switch.getString("version"))
+            assertEquals("1.0",switch.getString("version"))
             assertEquals(RemoteFunction.CONTENTS_TRANSFER,switch.getJSONArray("params").getString(0))
         } }
     }

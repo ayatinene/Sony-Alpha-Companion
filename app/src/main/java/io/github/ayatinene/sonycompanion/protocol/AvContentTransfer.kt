@@ -286,7 +286,7 @@ class AvContentTransfer(
             val json = JSONObject(http.post(endpoint, request.toString()))
             val error = json.optJSONArray("error")
             if (error != null) throw CameraApiError(error.optInt(0, -1), error.optString(1))
-            json.optJSONArray("result") ?: error("avContent 返回缺少 result：$method")
+            sonyRpcResult(json, method) ?: error("avContent 返回缺少 result：$method")
         }
 
     private fun namedValues(result: JSONArray, key: String, method: String): List<String> {
