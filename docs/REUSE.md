@@ -4,7 +4,7 @@
 
 | 本项目路径 | 上游来源 | 主要改动 |
 |---|---|---|
-| `protocol/RemoteCamera.kt` | `RealMadScientist/SonyRX10M3Remote` 的 `CameraController.kt`（MIT） | 提取 RPC、曝光参数、快门、AF、录像调用；去掉原工程的 ImageView 和相册耦合；加入明确错误处理、能力门控、事件版本协商、长曝光 `awaitTakePicture` 等待、`stopLiveview`、`startRecMode` 显式成功所有权与非录像态 `stopRecMode` 收尾及 Wi-Fi 网络绑定 |
+| `protocol/RemoteCamera.kt` | `RealMadScientist/SonyRX10M3Remote` 的 `CameraController.kt`（MIT） | 提取 RPC、曝光参数、快门、AF、录像调用；去掉原工程的 ImageView 和相册耦合；加入明确错误处理、能力门控、事件版本协商、基于 `getVersions`/`getMethodTypes` 与 `getSupportedCameraFunction` 的相机功能切换（`setCameraFunction`）能力探测、长曝光 `awaitTakePicture` 等待、`stopLiveview`、`startRecMode` 显式成功所有权与非录像态 `stopRecMode` 收尾及 Wi-Fi 网络绑定 |
 | `protocol/SmartphoneTransfer.kt` | `schorschii/ImagingEdge4Linux` 的 `imaging-edge.py`（Georg Sieber，GPL-3.0） | 将 Python 传输流程移植为 Kotlin；从描述文件读取 `controlURL`；按页返回目录、保留各尺寸资源、加入分页零进展报错、结构化 SOAP fault 与一次性原子认领的 `X_TransferEnd` |
 | `com/fimagena/libptp/**` | `Morning-Sea/SonyPhotoTransfer` 携带的 Fimagena `libptp`（Copyright 2017 Fimagena，LGPL-2.1-or-later，含 `SonyPhotoTransfer` 的流式接口修改） | 保留源码版权头与 LGPL-2.1 许可，具体修改见下节 |
 | `protocol/ComputerTransfer.kt`、`protocol/PtpTransaction.kt` | 参考 `Morning-Sea/SonyPhotoTransfer` 的 `SonyCameraClient.kt`（MIT）与 `shezi/airmtp` | 不使用随机 GUID，改为校验已登记 GUID；注入网络 `SocketFactory`；通过 `SessionScheduler` 将存储卡、句柄、`GetObjectInfo`、缩略图与流式 `.JPG`/`.ARW` 下载拆分为单事务串行调度（下载优先于扫描）；通过 `SessionGate` / `FinishSequence` / `GracefulCloser` 区分空闲正常关闭（标准 `CloseSession` + 有界超时中止与工作线程回收告警，仅手动空闲断开且开启实验开关时在关闭前尝试 `airmtp` 休眠对）与忙碌/取消/异常强制 `abort` |
@@ -25,4 +25,4 @@
 - `PtpDataType.java`：读取支持的操作码列表供能力判断；PTP 日期固定使用 `Locale.US`，避免手机系统语言影响协议数字格式。
 - 删除仅供上游桌面端手动测试的 `PtpTester`。
 
-Live View 分帧读取（`LiveViewReader`）、SSDP 与描述文件解析、下载队列与存储管理、日志诊断及 Android 界面均在本项目内实现。`alpha_capture_lab`、`SonyLiveMonitor` 和 `SonyCamera-Remote-API-Demo` 仅作协议行为参考，未复制其代码。构建依赖还包括 Apache-2.0 授权的 AndroidX、Kotlin、Coroutines 和 OkHttp。
+Live View 分帧读取（`LiveViewReader`）、遥控同连接图库只读协议层（`AvContentTransfer`）、SSDP 与描述文件解析、下载队列与存储管理、日志诊断及 Android 界面均在本项目内独立实现。`alpha_capture_lab`、`SonyLiveMonitor`（固定提交 `37d09e928b16e9984d9500d7a02956f42698bbd5`，未发现项目开源许可证）和 `SonyCamera-Remote-API-Demo` 仅作公开协议行为参考，未复制其代码。构建依赖还包括 Apache-2.0 授权的 AndroidX、Kotlin、Coroutines 和 OkHttp。

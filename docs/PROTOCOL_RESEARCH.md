@@ -6,7 +6,7 @@ Sony α7R II（ILCE-7RM2）的三种无线工作模式分别对应不同的机�
 
 | 相机入口 | 手机侧协议 | 发现与端点 | 文件边界 | 本项目策略 |
 |---|---|---|---|---|
-| Smart Remote Control | ScalarWebAPI / Camera Remote API（HTTP JSON-RPC） | SSDP `UDP 1900`（`urn:schemas-sony-com:service:ScalarWebAPI:1`）；从描述文件读取 `ActionList` URL | 实时取景 JPEG 流；拍照返回或 `getEvent` 通知的 JPEG 预览图（postview），不能读取整卡 RAW | 复用 MIT 遥控控制层，按接口动态能力启用功能 |
+| Smart Remote Control | ScalarWebAPI / Camera Remote API（HTTP JSON-RPC：`camera` + `avContent`） | SSDP `UDP 1900`（`urn:schemas-sony-com:service:ScalarWebAPI:1`）；从描述文件解析 `camera` 与 `avContent` 的 `ActionList` URL | 实时取景 JPEG 流、拍照返回或 `getEvent` 通知的 JPEG 预览图（postview）；切入 `Contents Transfer` 后可通过 `avContent` 倒序分页列举存储卡内容并经 HTTP 下载原始 `.JPG` 与 `.ARW` | 复用 MIT 遥控控制层并独立实现只读 `avContent` 协议层，按动态能力与实际响应启用功能 |
 | Send to Smartphone | Sony UPnP / SOAP + HTTP 下载 | SSDP 描述文件（如 `dd.xml`，缺失服务时回退探测 `DmsDescPush.xml`）；读取 `ContentDirectory` / `XPushList` 的 `controlURL` | DIDL-Lite 中实际列出的 `res` 资源；RAW 条目可能只提供内嵌 JPEG 预览 | 移植 `ImagingEdge4Linux`，不混用 PTP/IP 假设 |
 | Send to Computer | MTP over PTP/IP（双 TCP 通道） | SSDP `MtpNullService:1`；`TCP 15740` | `GetStorageIDs` / `GetObjectHandles` / `GetObjectInfo` / `GetThumb` / `GetObject`，可包含原始 ARW 与 JPEG | 基于 `libptp` 流式传输 + Sony 专有开始命令，需已登记 GUID |
 
@@ -20,6 +20,15 @@ Sony α7R II（ILCE-7RM2）的三种无线工作模式分别对应不同的机�
 - 遥控拍照回传的是 JPEG postview，原文件是否写卡由机身设置决定。长曝光返回 `40403` 或等待超时后，若支持 `awaitTakePicture` 则等待结果，不重发 `actTakePicture`。
 - AF 使用接口声明的半按/取消对（仅在当前会话仍持有该相机实例时释放半按）；录像仅在 API 允许的相机模式下启用。
 - 正常断开（或初始化后续步骤失败回滚）时，先尝试 `stopLiveview`，且仅在本应用曾显式收到 `startRecMode` 成功响应、同时相机未处于录像中（`MovieRecording`）时才调用 `stopRecMode`，绝不自动停止正在进行的录像；Wi-Fi 断开或后台强制取消时先关闭底层 HTTP 连接，不补发任何清理 RPC。
+
+### Smart Remote 同连接内容传输（avContent）
+
+原厂环境命令行实测确认无需修改或重装相机 APK，即可在同一相机 Wi-Fi 热点连接下切换遥控拍摄（`Remote Shooting`）与内容传输（`Contents Transfer`）。早期实测曾记录机内版本 `3.21`（当时仅开放 EV），而本次实测未保存 `getApplicationInfo` 返回值，确切机内应用版本未知（既不能推断 `3.21` 不支持该能力，也不能推断机内应用已升级），因此实现中不按固定应用版本号推断能力，均以运行时动态查询为准：
+
+- **能力门控与功能切换**：实测发现 `setCameraFunction` 可能未出现在当时的 `getAvailableApiList` 中，但调用仍返回 `{"result":[0]}` 成功。本应用门控不依赖 `getAvailableApiList` 是否包含 `setCameraFunction`，而是检查描述文件是否提供 `avContent` 服务、`camera` 服务是否通过 `getVersions` / `getMethodTypes` 声明 `setCameraFunction` 的可用版本、以及 `getSupportedCameraFunction` 是否同时返回 `Contents Transfer` 与 `Remote Shooting`。进入图库前先停止实时取景与事件轮询（等待 `stopLiveview` 完成），保持 `startRecMode` 会话所有权不调 `stopRecMode`，再以协商版本调用 `setCameraFunction(["Contents Transfer"])`。未就绪时相机可能返回错误码 `7`（`[7, "Not Available Now"]`），控制器对其做有界重试，绝不将错误 `7` 或畸形响应当作空列表处理。
+- **版本协商与单对象参数结构**：`avContent/getVersions` 实测返回 `["1.0", "1.1", "1.2", "1.3"]`；通过 `getMethodTypes` 确认 `1.0` 提供 `getSchemeList` / `getSourceList`、`1.2` 提供 `getContentCount`、`1.3` 提供 `getContentList`（只读实现，不调用 `deleteContent`）。各请求以 JSON-RPC 顶层 `version` 指定版本，`params` 为单对象数组 `[{...}]`：先调 `getSchemeList`（返回 `[{"scheme":"storage"}]`）与 `getSourceList`（`params: [{"scheme":"storage"}]`，返回 `[{"source":"storage:memoryCard1"}]`），再调 `getContentCount`（顶层 `version: "1.2"`，`params: [{"uri":"storage:memoryCard1","view":"flat"}]`，实测返回 `{"result":[{"count":1843}]}`，该计数为内容条目数而非展开后的文件数），最后调 `getContentList`（顶层 `version: "1.3"`，`params: [{"uri":"storage:memoryCard1","stIdx":0,"cnt":20,"view":"flat","sort":"descending"}]`）。实测拉取最新 20 个内容条目耗时 `1.679049` 秒。
+- **内容条目结构与原文件 HTTP 下载**：`getContentList` 的 `result[0]` 数组中，每项顶层含 `uri`（如 `"image:content?contentId=..."`）、`contentKind`（`"still"`）、`createdTime`、`folderNo`、`fileNo`，嵌套 `content` 对象内含 `original` 数组（每项含 `fileName`、`stillObject` 如 `"jpeg"` / `"raw"`、`url` 如 `/contentstransfer/orgjpeg/...` 与 `/contentstransfer/orgraw/...`）以及预览地址 `thumbnailUrl`、`smallUrl`、`largeUrl`。单条 RAW+JPEG 内容项按 `original` 展开为独立的 `.JPG` 与 `.ARW` 条目；图库预览 ARW 时仅读取相机预览/缩略图 URL，不拉取整张 RAW 原文件。实测直接 HTTP GET 下载 `DSC00027.ARW`（`36,700,160` bytes）耗时 `16.060128` 秒（约 2.18 MiB/s），SHA-256 为 `de4e94bd363d6b0d517c0b316291135f741c616f471539bcc5b31da13731723c`（字节长度与此前 PTP/IP 下载的同名 `DSC00027.ARW` 一致，但 PTP/IP 副本未计算 SHA-256，未做跨通道哈希比对）。
+- **返回拍摄与断开收尾**：调用 `setCameraFunction(["Remote Shooting"])` 返回 `{"result":[0]}` 后，紧接着查询 `getCameraFunction` 曾瞬时返回 `error [1, "Not Available Now"]`，但 `getAvailableApiList` 已恢复 `actTakePicture`、`startLiveview`、`actHalfPressShutter`、`setIsoSpeedRate` 等拍摄接口；控制器在返回拍摄时容忍瞬态 `getCameraFunction` 报错，结合 `getEvent(false)` 确认相机空闲且 `startLiveview` 恢复后重启取景（切回后恢复 Live View 与触发快门仅待本应用实机测试确认）。在图库状态下正常断开连接时，收尾序列会先尽力调用 `setCameraFunction(["Remote Shooting"])` 再执行 `stopRecMode`。`Remote Shooting` 与 `Contents Transfer` 互斥切换，不支持边实时取景边传输文件。
 
 ## Send to Smartphone：UPnP 浏览与下载
 
@@ -49,7 +58,7 @@ Sony α7R II（ILCE-7RM2）的三种无线工作模式分别对应不同的机�
 |---|---|---|
 | [Rkm1999/alpha_capture_lab](https://github.com/Rkm1999/alpha_capture_lab) `ab0f9c8cb9fee650d0a5f87c9888f746e754f817` | Android Kotlin/Compose；SSDP、JSON-RPC、Live View、`getEvent` 1.2、机身快门队列等；未发现仓库自身开源许可证 | 不复制代码；仅参考其协议状态与版本协商设计 |
 | [RealMadScientist/SonyRX10M3Remote](https://github.com/RealMadScientist/SonyRX10M3Remote) `8f0c957dc285579dce473cef827c5e43b44563bb` | Android Kotlin，MIT；`CameraController` 包含完整 HTTP RPC、曝光参数、AF、录像、间隔拍摄 | 作为遥控控制层基础；改为明确错误处理、能力门控、`awaitTakePicture` 等待与 Wi-Fi 绑定 |
-| [otonielpv/SonyLiveMonitor](https://github.com/otonielpv/SonyLiveMonitor) `59e967cdbd22b12965834568c9006c71937b98f9` | 含 Live View 数据帧解析；机内相册扩展依赖相机端非官方补丁 | 仅参考数据帧头解析；不采用任何相机补丁方案 |
+| [otonielpv/SonyLiveMonitor](https://github.com/otonielpv/SonyLiveMonitor) `37d09e928b16e9984d9500d7a02956f42698bbd5` | 含 Live View 数据帧解析与相册扩展（上游说明提及相机端补丁依赖）；未发现项目开源许可证 | 不复制代码、不移植任何相机补丁；仅参考标准 ScalarWebAPI RPC 行为独立实现（原厂环境已实测可用） |
 | [schorschii/ImagingEdge4Linux](https://github.com/schorschii/ImagingEdge4Linux) `5317d416ed5296fc5a3343442b17276afb9ccc77` | Python，GPL-3.0；完整 Start → Browse/递归/分页 → HTTP 下载 → End，`PushRoot` 回退 `PhotoRoot` | 移植为 Kotlin 实现 JPEG 传输模块，保留全部资源字段并加入分页零进展保护 |
 | [Morning-Sea/SonyPhotoTransfer](https://github.com/Morning-Sea/SonyPhotoTransfer) `6d39accd8c0b366be2efb4c72f11234aba015d51` | Android Kotlin，MIT，内含 Fimagena `libptp`（LGPL-2.1）；PTP/IP 枚举、缩略图与流式 `GetObject` | 作为 RAW 实验模块基础；修复 `libptp` 流式内存分配、64 KiB 分块、超时与关闭逻辑，要求已登记 GUID |
 | [falk0069/sony-pm-alt](https://github.com/falk0069/sony-pm-alt) `9d1d17a57c288250e2181edaf0f55560c2bfa0e4` | Python `MtpNullService` SSDP 监听 + C 语言 USB GUID 写入工具 | 作为 RAW 会话流程与 USB GUID 登记报文参考 |

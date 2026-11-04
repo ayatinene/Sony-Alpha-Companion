@@ -25,6 +25,10 @@ fun refreshQueuedFile(old: CameraFile, current: List<CameraFile>): CameraFile? {
     val fresh=current.singleOrNull { it.id==old.id && it.parent==old.parent && it.name==old.name && !it.container } ?: return null
     if (old.date.isBlank() || fresh.date!=old.date) return null
     if (old.handle!=null) return fresh.takeIf { old.size>0 && it.size==old.size }
+    // avContent originals: the fresh entry already carries the re-queried URL and the explicit
+    // format/identity; the id pins source + content + format + file name, so a same-format sibling
+    // never matches. The stored URL is treated as data only and is always replaced.
+    if (old.original) return fresh
     val chosen=old.bestResource() ?: return null
     val resource=fresh.resources.singleOrNull {
         it.isJpeg && it.jpegSize==chosen.jpegSize && it.resolution==chosen.resolution &&
@@ -34,7 +38,14 @@ fun refreshQueuedFile(old: CameraFile, current: List<CameraFile>): CameraFile? {
 }
 
 fun transferSource(scope: String, file: CameraFile, resource: Resource?): String {
-    val variant=resource?.let { "${it.jpegSize}:${it.resolution}:${it.size}" } ?: "original:${file.size}"
+    // An avContent original's identity must not depend on the declared size: the listing may report 0
+    // and the download response a real length, and a size-sensitive key would then look like a new
+    // file and re-download an already-imported photo.
+    val variant=when {
+        file.original -> "original:${file.format}:${file.name}"
+        resource!=null -> "${resource.jpegSize}:${resource.resolution}:${resource.size}"
+        else -> "original:${file.size}"
+    }
     return listOf(scope,file.parent,file.name,file.id,file.date,variant).joinToString("|")
 }
 
@@ -47,6 +58,7 @@ class TransferQueueStore(private val file: File) {
             JSONObject().put("state",item.state).put("error",item.error).put("file",JSONObject()
                 .put("id",f.id).put("name",f.name).put("date",f.date).put("parent",f.parent)
                 .put("size",f.size).put("raw",f.raw).put("handle",f.handle).put("thumbnail",f.thumbnail)
+                .put("original",f.original).put("format",f.format).put("protocol",f.protocol)
                 .put("resources",JSONArray(f.resources.map { r -> JSONObject().put("url",r.url).put("mime",r.mime)
                     .put("size",r.size).put("resolution",r.resolution).put("profile",r.profile) })))
         }))
@@ -64,7 +76,8 @@ class TransferQueueStore(private val file: File) {
             } }
             val cameraFile=CameraFile(f.getString("id"),f.getString("name"),resources,
                 f.optString("thumbnail").takeIf(String::isNotBlank),f.getString("date"),size=f.getLong("size"),
-                raw=f.getBoolean("raw"),handle=if(f.has("handle"))f.getLong("handle")else null,parent=f.optString("parent"))
+                raw=f.getBoolean("raw"),handle=if(f.has("handle"))f.getLong("handle")else null,parent=f.optString("parent"),
+                original=f.optBoolean("original",false),format=f.optString("format"),protocol=f.optString("protocol"))
             val oldState=item.getString("state")
             QueueItem(cameraFile,if(oldState in setOf("等待","传输中")) "待恢复" else oldState,
                 error=item.optString("error").takeIf(String::isNotBlank))
