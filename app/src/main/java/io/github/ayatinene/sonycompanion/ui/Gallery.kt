@@ -305,7 +305,7 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
                         if (file.id in selectedVisible) Icon(Icons.Outlined.CheckCircle, "已选择", tint=MaterialTheme.colorScheme.primary)
                     }
                 }
-                if (remote) item { RemoteLoadMore(state, actions, galleryError != null) }
+                if (remote) item { RemoteLoadMore(state, actions) }
             }
         }
         if (unsupported > 0) Text("所选的 $unsupported 个文件未提供${selectedSize.title}，请更改尺寸或取消选择。", Modifier.padding(horizontal=16.dp), style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.error)
