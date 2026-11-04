@@ -115,7 +115,9 @@ data class AppState(val mode: CameraMode? = null, val connected: Boolean = false
     val connecting: Boolean = false,
     val busy: Boolean = false, val message: String = "请连接相机", val error: String? = null,
     val device: Device? = null, val remote: RemoteState = RemoteState(),
-    val files: List<CameraFile> = emptyList(), val folder: String = "", val queue: List<QueueItem> = emptyList(),
+    val files: List<CameraFile> = emptyList(), val folder: String = "",
+    /** Ordered parent URIs for JPEG folders and the REMOTE date level. */
+    val galleryPath: List<String> = emptyList(), val queue: List<QueueItem> = emptyList(),
     val transferring: Boolean = false, val local: List<LocalPhoto> = emptyList(), val logs: List<String> = emptyList(),
     val intervalRemaining: Int = 0, val queueScope: String? = null, val queueNotice: String = "",
     val scan: ScanState = ScanState(), val sessionGeneration: Long = 0)

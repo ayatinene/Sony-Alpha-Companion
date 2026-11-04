@@ -62,6 +62,7 @@ class RemoteGalleryIntegrationTest {
         @Volatile var cameraFunctionFails = false
         val calls = Collections.synchronizedList(mutableListOf<String>())
         val contentCount = 45
+        val dateUri = "storage:memorycard1?path=2026-01-02"
         private val apis = JSONArray(listOf("startRecMode","actTakePicture","stopRecMode","startLiveview","stopLiveview",
             "getVersions","getApplicationInfo","getSupportedCameraFunction","getCameraFunction","getEvent"))
 
@@ -102,19 +103,28 @@ class RemoteGalleryIntegrationTest {
             }
             "getSchemeList" -> ok(JSONArray().put(JSONArray().put(JSONObject().put("scheme","storage"))))
             "getSourceList" -> ok(JSONArray().put(JSONArray().put("storage:memorycard1")))
-            "getContentCount" -> ok(JSONArray().put(JSONObject().put("count",contentCount)))
+            "getContentCount" -> {
+                val uri=json.optJSONArray("params")?.optJSONObject(0)?.optString("uri")
+                ok(JSONArray().put(JSONObject().put("count",if(uri==dateUri) contentCount else 1)))
+            }
             "getContentList" -> {
                 val params=json.optJSONArray("params")
                 val spec=params?.optJSONObject(0) ?: params?.optJSONObject(1)
                 val start=spec?.optInt("stIdx") ?: 0
                 val count=spec?.optInt("cnt") ?: 20
                 val items=JSONArray()
-                for(i in start until minOf(start+count,contentCount)) {
-                    val name="DSC%05d.JPG".format(i)
-                    items.put(JSONObject().put("uri","content://$i").put("contentKind","still").put("createdTime","2026-01-02T03:04:05Z")
-                        .put("content",JSONObject()
-                            .put("original",JSONArray().put(JSONObject().put("url","http://cam/$name").put("fileName",name).put("fileSize",1000).put("stillObject","jpeg")))
-                            .put("largeUrl","http://cam/pv_$i.jpg")))
+                val uri=spec?.optString("uri").orEmpty()
+                if(uri=="storage:memorycard1") {
+                    if(start==0) items.put(JSONObject().put("uri",dateUri)
+                        .put("title","2026-01-02").put("contentKind","date").put("isBrowsable","true"))
+                } else if(uri==dateUri) {
+                    for(i in start until minOf(start+count,contentCount)) {
+                        val name="DSC%05d.JPG".format(i)
+                        items.put(JSONObject().put("uri","content://$i").put("contentKind","still").put("createdTime","2026-01-02T03:04:05Z")
+                            .put("content",JSONObject()
+                                .put("original",JSONArray().put(JSONObject().put("url","http://cam/$name").put("fileName",name).put("fileSize",1000).put("stillObject","jpeg")))
+                                .put("largeUrl","http://cam/pv_$i.jpg")))
+                    }
                 }
                 ok(JSONArray().put(items))
             }
@@ -175,7 +185,9 @@ class RemoteGalleryIntegrationTest {
             assertTrue("setCameraFunction must follow stopLiveview",set>stop)
             assertFalse("a mode switch must never stop record mode",calls.contains("stopRecMode"))
             assertTrue("first page published immediately",controller.state.value.files.isNotEmpty())
-            assertEquals("45", controller.state.value.remote.totalFiles?.toString() ?: "null")
+            assertEquals("1", controller.state.value.remote.totalFiles?.toString() ?: "null")
+            assertEquals("2026-01-02",controller.state.value.files.single().name)
+            assertTrue(controller.state.value.files.single().container)
         }
     }
 
@@ -185,6 +197,11 @@ class RemoteGalleryIntegrationTest {
             connectGallery(server,camera)
             controller.openRemoteGallery()
             waitUntil { controller.state.value.remote.galleryActive && !controller.state.value.remote.remoteSwitching }
+            assertEquals(1,controller.state.value.files.size)
+            val folder=controller.state.value.files.single()
+            assertTrue(folder.container)
+            controller.browse(folder.id)
+            waitUntil { controller.state.value.folder==folder.id && !controller.state.value.remote.loadingMore }
             assertEquals(20,controller.state.value.files.size)
             assertTrue(controller.state.value.remote.hasMoreFiles)
             controller.loadMoreRemoteFiles()
@@ -194,6 +211,11 @@ class RemoteGalleryIntegrationTest {
             waitUntil { controller.state.value.files.size==45 }
             assertFalse("the declared count is reached",controller.state.value.remote.hasMoreFiles)
             assertEquals(45,controller.state.value.remote.loadedContentCount)
+            controller.up()
+            waitUntil { controller.state.value.folder=="storage:memorycard1" && !controller.state.value.remote.loadingMore }
+            assertEquals(listOf("2026-01-02"),controller.state.value.files.map { it.name })
+            assertTrue(controller.state.value.galleryPath.isEmpty())
+            assertEquals(1, camera.calls.count { it=="setCameraFunction" })
         }
     }
 

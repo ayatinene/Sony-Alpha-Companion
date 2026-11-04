@@ -89,7 +89,10 @@ fun avContentQueueScope(device: Device): String =
  * + original file name so a restored queue entry is matched back to the exact original without
  * trusting its stored URL, and two same-format originals of one item never collide.
  */
-fun AvContentItem.toCameraFiles(): List<CameraFile> = original.map { res ->
+fun AvContentItem.toCameraFiles(): List<CameraFile> =
+    if (isDateFolder) listOf(CameraFile(
+        id = contentId, name = name, container = true, parent = source, protocol = PROTOCOL_HTTP
+    )) else original.map { res ->
     val raw = res.format == AV_CONTENT_FORMAT_RAW
     val originalName = res.name.ifBlank { res.url.substringAfterLast('/').substringBefore('?') }
     // [parent] keeps same-named items in different parent folders apart so RAW/JPEG pairing and

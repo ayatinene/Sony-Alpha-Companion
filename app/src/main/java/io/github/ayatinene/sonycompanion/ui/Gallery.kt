@@ -1,6 +1,7 @@
 package io.github.ayatinene.sonycompanion.ui
 
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
@@ -34,6 +35,7 @@ private val galleryShape = RoundedCornerShape(10.dp)
 data class GalleryActions(
     val browse: (String) -> Unit = {},
     val root: () -> Unit = {},
+    val up: () -> Unit = {},
     val enqueue: (List<CameraFile>, Long) -> Unit = { _, _ -> },
     val cancelTransfers: () -> Unit = {},
     val retryFailed: () -> Unit = {},
@@ -56,6 +58,7 @@ data class GalleryActions(
 fun CompanionController.galleryActions(): GalleryActions = GalleryActions(
     browse = ::browse,
     root = ::root,
+    up = ::up,
     enqueue = { files, generation -> enqueue(files, generation) },
     cancelTransfers = ::cancelTransfers,
     retryFailed = ::retryFailed,
@@ -95,6 +98,12 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     var returnFailed by remember { mutableStateOf(false) }
     var wasReturning by remember { mutableStateOf(false) }
     var galleryError by remember(state.sessionGeneration, state.remote.epoch) { mutableStateOf<String?>(null) }
+    // The photo dialog dismisses itself. Back in a directory returns one level instead of
+    // leaving the camera gallery; no connection restart is involved.
+    BackHandler(enabled=state.galleryPath.isNotEmpty() && preview==null && detail==null &&
+        !state.busy && !state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore) {
+        actions.up()
+    }
     LaunchedEffect(returning) { if (returning) wasReturning = true }
     LaunchedEffect(state.remote.loadingMore) { if (state.remote.loadingMore) galleryError = null }
     LaunchedEffect(state.remote.remoteSwitching) { if (state.remote.remoteSwitching) returnFailed = false }
@@ -160,6 +169,10 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal=12.dp), verticalAlignment=Alignment.CenterVertically) {
+            if (state.galleryPath.isNotEmpty()) IconButton(onClick=actions.up,
+                enabled=!state.busy && !state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore) {
+                Icon(Icons.Outlined.ArrowBack, "返回上一级")
+            }
             if (state.mode == CameraMode.JPEG) IconButton(onClick=actions.root, enabled=!state.busy && !state.transferring) { Icon(Icons.Outlined.FolderOpen, "返回根目录") }
             Text(if (remote) "已连接 · 相机图库" else "相机图库", Modifier.weight(1f), style=MaterialTheme.typography.titleSmall, maxLines=1, overflow=TextOverflow.Ellipsis)
             if (remote) TextButton(

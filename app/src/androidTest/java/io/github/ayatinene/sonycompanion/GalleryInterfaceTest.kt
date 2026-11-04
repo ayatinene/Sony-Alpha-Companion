@@ -77,6 +77,21 @@ class GalleryInterfaceTest {
         compose.onNodeWithText("ARW").assertExists()
     }
 
+    @Test fun jpegDateFolderCanReturnToParentWithoutReconnect() {
+        var wentUp=0
+        var state by mutableStateOf(jpeg(listOf(jpegFile("a"))).copy(
+            folder="date-2024",galleryPath=listOf("PhotoRoot")
+        ))
+        compose.setContent { MaterialTheme {
+            CameraGallery(state,GalleryActions(up={wentUp++}))
+        } }
+        compose.onNodeWithContentDescription("返回上一级").assertExists().performClick()
+        compose.runOnIdle { assertEquals(1,wentUp) }
+        compose.runOnIdle { state=state.copy(folder="PhotoRoot",galleryPath=emptyList()) }
+        compose.onNodeWithContentDescription("返回上一级").assertDoesNotExist()
+        compose.onNodeWithContentDescription("返回根目录").assertExists()
+    }
+
     @Test fun longPressSelectAllAndCancelDriveTheDownloadCount() {
         render(computer(listOf(rawFile("a"),rawFile("b")),ScanState(phase=ScanPhase.Done)))
         compose.onNodeWithTag("gallery-item-a").performTouchInput { longClick() }

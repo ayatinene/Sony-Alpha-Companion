@@ -334,7 +334,7 @@ class CompanionController(private val context: Context) {
                 pendingConnection = attempt
                 var remoteAttempt: RemoteCamera? = null
                 var smartphoneAttempt: SmartphoneTransfer? = null
-                update { copy(connecting=true,mode=mode,busy=true,message="查找相机…",error=null,files=emptyList(),remote=RemoteState(),scan=ScanState()) }
+                update { copy(connecting=true,mode=mode,busy=true,message="查找相机…",error=null,files=emptyList(),folder="",galleryPath=emptyList(),remote=RemoteState(),scan=ScanState()) }
                 log("开始连接 mode=$mode",tag="CONNECT")
                 try {
                     // Test seam: a local transport + device list lets lifecycle tests drive a real
@@ -440,7 +440,7 @@ class CompanionController(private val context: Context) {
                             if(whenGeneration(gen) { smartphone=transfer; true } != true) { attempt.abortAll(); return@launch }
                             val files=transfer.initialize()
                             val published=whenGeneration(gen) {
-                                update { copy(connected=true,files=files,folder=transfer.rootId,message="已连接 · JPEG 传输") }
+                                update { copy(connected=true,files=files,folder=transfer.rootId,galleryPath=emptyList(),message="已连接 · JPEG 传输") }
                                 attempt.release()
                                 true
                             }
@@ -670,7 +670,7 @@ class CompanionController(private val context: Context) {
             computer=null; remote=null; smartphone=null; http=null; selectedNetwork=null
             avContent=null; avContentSource=null; galleryPager=null; avContentEndpoint=null
             captureBinding.clear()
-            update { copy(connected=false,connecting=false,busy=false,transferring=false,scan=ScanState()) }
+            update { copy(connected=false,connecting=false,busy=false,transferring=false,folder="",galleryPath=emptyList(),scan=ScanState()) }
             DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,oldGallery,monitoring,monitoringStopJob,ownConnection,attempt,actions,graceful)
         }
         if(!detached.effectiveGraceful) {
@@ -955,16 +955,16 @@ class CompanionController(private val context: Context) {
         val av=AvContentTransfer(endpoint,requireNotNull(http)) { message -> log(message,LogLevel.DEBUG,"AVCONTENT") }
         val source=openGallerySource(av)
         if(!ownsCamera(camera,gen)) return
-        val total=bestEffortValue { retryNotAvailableNow { av.count(source) } }?.takeIf { it>=0 }
+        val total=bestEffortValue { retryNotAvailableNow { av.count(source,AvContentTransfer.VIEW_DATE) } }?.takeIf { it>=0 }
         val pager=GalleryPager(AvContentTransfer.DEFAULT_PAGE_SIZE)
         pager.begin(source,total)
-        val page=retryNotAvailableNow { av.getContentPage(source,0,pager.pageSize) }
+        val page=retryNotAvailableNow { av.getContentPage(source,0,pager.pageSize,view=AvContentTransfer.VIEW_DATE) }
         val fresh=pager.accept(page)
         val files=fresh.flatMap { it.toCameraFiles() }
         whenGeneration(gen) {
             if(remote!==camera) return@whenGeneration
             avContent=av; avContentSource=source; galleryPager=pager
-            update { copy(files=files, message="相机图库 · ${pager.contentLoaded} 项",
+            update { copy(files=files,folder=source,galleryPath=emptyList(), message="相机图库 · ${pager.contentLoaded} 项",
                 remote=remote.copy(galleryActive=true, remoteSwitching=false, loadingMore=false, loadMoreFailed=false,
                     hasMoreFiles=pager.hasMore, totalFiles=pager.total, loadedContentCount=pager.contentLoaded,
                     remoteFunction=RemoteFunction.CONTENTS_TRANSFER, switchTarget="")) }
@@ -1063,7 +1063,7 @@ class CompanionController(private val context: Context) {
         if(!latched) return
         galleryJob=scope.launch {
             try {
-                val page=retryNotAvailableNow { av.getContentPage(source,pager.nextStart,pager.pageSize) }
+                val page=retryNotAvailableNow { av.getContentPage(source,pager.nextStart,pager.pageSize,view=AvContentTransfer.VIEW_DATE) }
                 val fresh=pager.accept(page)
                 val files=fresh.flatMap { it.toCameraFiles() }
                 whenGeneration(gen) {
@@ -1158,7 +1158,7 @@ class CompanionController(private val context: Context) {
                 if(!ownsCamera(camera,gen)) return@launch
                 confirmShootingReady(camera,gen)
                 if(!ownsCamera(camera,gen)) return@launch
-                whenGeneration(gen) { if(remote===camera) update { copy(files=emptyList(), message="已返回拍摄模式",
+                whenGeneration(gen) { if(remote===camera) update { copy(files=emptyList(),folder="",galleryPath=emptyList(), message="已返回拍摄模式",
                     remote=remote.copy(galleryActive=false, remoteSwitching=false, hasMoreFiles=false, loadingMore=false,
                         totalFiles=null, loadedContentCount=0, remoteFunction=RemoteFunction.REMOTE_SHOOTING, switchTarget="")) } }
                 startMonitoring()
@@ -1200,34 +1200,110 @@ class CompanionController(private val context: Context) {
         // pages are still available an unmatched entry may simply live on a page not loaded yet, so it
         // stays resumable instead of being wrongly downgraded to "需重新选择".
         val listingComplete=!snapshot.remote.hasMoreFiles
+        val currentDate=snapshot.folder.takeIf { it.isNotBlank() && it!=avContentSource }
         val updated=snapshot.queue.map { item ->
             if(item.file.original && item.state in setOf("待恢复","失败","已取消","需重新选择")) {
                 val fresh=refreshQueuedFile(item.file,files)
                 when {
                     fresh!=null -> item.copy(file=fresh,state="待恢复",error=null)
-                    listingComplete -> item.copy(state="需重新选择",error="无法确认该文件，请重新选择后再下载。")
+                    // A date-root listing contains no originals and cannot prove a queue entry missing.
+                    listingComplete && currentDate!=null && item.file.id.startsWith("$currentDate#") ->
+                        item.copy(state="需重新选择",error="无法确认该文件，请重新选择后再下载。")
                     else -> item
                 }
             } else item
         }
         if(updated!=snapshot.queue) whenGeneration(gen) { if(remote===camera) update { copy(queue=updated) } }
     }
-    fun browse(id: String) {
-        val gen=state.value.sessionGeneration
+    private enum class JpegNavigation { Enter, Up, Root }
+
+    private fun browseJpeg(id: String, navigation: JpegNavigation) {
+        val snapshot=state.value
+        if(!snapshot.connected || snapshot.mode!=CameraMode.JPEG || snapshot.busy || snapshot.transferring) return
         val camera=smartphone ?: return
+        val gen=snapshot.sessionGeneration
         sessionAction(gen) {
             if(whenGeneration(gen) { smartphone===camera } != true) return@sessionAction
             whenGeneration(gen) { update { copy(busy=true) } }
             try {
                 log("浏览目录 id=$id",LogLevel.DEBUG,"BROWSE")
                 val files=camera.browse(id)
-                whenGeneration(gen) { if(smartphone===camera) update { copy(files=files,folder=id) } }
+                whenGeneration(gen) {
+                    if(smartphone===camera) update {
+                        val history=when(navigation) {
+                            JpegNavigation.Root -> emptyList()
+                            JpegNavigation.Up -> galleryPath.dropLast(1)
+                            JpegNavigation.Enter -> if(folder==id) galleryPath else galleryPath+folder
+                        }
+                        copy(files=files,folder=id,galleryPath=history)
+                    }
+                }
                 log("目录返回 id=$id entries=${files.size}",LogLevel.DEBUG,"BROWSE")
-            }
-            finally { whenGeneration(gen) { update { copy(busy=false) } } }
+            } finally { whenGeneration(gen) { update { copy(busy=false) } } }
         }
     }
-    fun root() { smartphone?.let { browse(it.rootId) } }
+
+    /** Browse only a camera-supplied date URI, never one constructed from a filename. */
+    private fun browseRemoteDate(id: String) {
+        val snapshot=state.value
+        val camera=remote ?: return
+        val av=avContent ?: return
+        val root=avContentSource ?: return
+        if(!snapshot.connected || snapshot.mode!=CameraMode.REMOTE || !snapshot.remote.galleryActive ||
+            snapshot.remote.remoteSwitching || snapshot.remote.loadingMore || snapshot.busy || snapshot.transferring) return
+        if(id!=root && !(snapshot.folder==root && snapshot.files.any { it.container && it.id==id })) return
+        val gen=snapshot.sessionGeneration
+        val latched=identity.locked {
+            if(identity.currentGeneration==gen && remote===camera && avContent===av) {
+                update { copy(remote=remote.copy(loadingMore=true,loadMoreFailed=false),error=null) }
+                true
+            } else false
+        }
+        if(!latched) return
+        galleryJob?.cancel()
+        galleryJob=scope.launch {
+            try {
+                val total=bestEffortValue { retryNotAvailableNow { av.count(id,AvContentTransfer.VIEW_DATE) } }?.takeIf { it>=0 }
+                val pager=GalleryPager(AvContentTransfer.DEFAULT_PAGE_SIZE)
+                pager.begin(id,total)
+                val page=retryNotAvailableNow { av.getContentPage(id,0,pager.pageSize,view=AvContentTransfer.VIEW_DATE) }
+                val files=pager.accept(page).flatMap { it.toCameraFiles() }
+                whenGeneration(gen) {
+                    if(remote!==camera || avContent!==av) return@whenGeneration
+                    galleryPager=pager
+                    update { copy(files=files,folder=id,galleryPath=if(id==root) emptyList() else listOf(root),
+                        remote=remote.copy(loadingMore=false,loadMoreFailed=false,hasMoreFiles=pager.hasMore,
+                            totalFiles=pager.total,loadedContentCount=pager.contentLoaded)) }
+                }
+                refreshGalleryQueue(gen,camera)
+            } catch(e: CancellationException) { throw e }
+            catch(e: Exception) {
+                log("读取日期目录失败：${e.message}",LogLevel.ERROR,"GALLERY",e)
+                whenGeneration(gen) { if(remote===camera && avContent===av) update {
+                    copy(remote=remote.copy(loadingMore=false,loadMoreFailed=true),error="无法读取相机文件，请重试或返回拍摄。")
+                } }
+            }
+        }
+    }
+
+    fun browse(id: String) {
+        val snapshot=state.value
+        if(snapshot.mode==CameraMode.REMOTE && snapshot.remote.galleryActive) browseRemoteDate(id)
+        else if(snapshot.mode==CameraMode.JPEG) browseJpeg(id,JpegNavigation.Enter)
+    }
+    fun up() {
+        val snapshot=state.value
+        val parent=snapshot.galleryPath.lastOrNull() ?: return
+        if(snapshot.mode==CameraMode.REMOTE && snapshot.remote.galleryActive) browseRemoteDate(parent)
+        else if(snapshot.mode==CameraMode.JPEG) browseJpeg(parent,JpegNavigation.Up)
+    }
+    fun root() {
+        val snapshot=state.value
+        if(snapshot.mode==CameraMode.REMOTE && snapshot.remote.galleryActive)
+            avContentSource?.let(::browseRemoteDate)
+        else if(snapshot.mode==CameraMode.JPEG)
+            smartphone?.let { browseJpeg(it.rootId,JpegNavigation.Root) }
+    }
     suspend fun cameraPreview(file: CameraFile, expectedScope: String?, expectedGeneration: Long = state.value.sessionGeneration): Bitmap? {
         val snapshot=state.value;val transport=http;val ptp=computer
         return withContext(Dispatchers.IO) { thumbnailGate.withPermit {
@@ -1271,7 +1347,10 @@ class CompanionController(private val context: Context) {
         return withContext(Dispatchers.IO) { thumbnailGate.withPermit {
         if(!snapshot.connected || !state.value.connected || snapshot.queueScope!=expectedScope || state.value.queueScope!=expectedScope
             || snapshot.sessionGeneration!=expectedGeneration || state.value.sessionGeneration!=expectedGeneration) return@withContext null
-        val key="${expectedGeneration}:${snapshot.queueScope}:${file.id}:${file.thumbnail}"; thumbs.get(key)?.let { return@withContext it }
+        val key=if(file.original && file.protocol==PROTOCOL_HTTP && file.thumbnail!=null)
+            "${expectedGeneration}:${snapshot.queueScope}:thumbnail:${file.thumbnail}"
+        else "${expectedGeneration}:${snapshot.queueScope}:${file.id}:${file.thumbnail}"
+        thumbs.get(key)?.let { return@withContext it }
         try {
             val bytes = if(file.handle!=null) ptp?.thumbnail(file.handle) else {
                 val url=file.thumbnail ?: file.bestResource()?.url ?: return@withContext null
@@ -1308,7 +1387,11 @@ class CompanionController(private val context: Context) {
                     val verified=incoming.mapNotNull { file ->
                         if(file.container) null
                         else if(mode==CameraMode.COMPUTER) matchCurrentFile(file,this.files)
-                        else file
+                        else if(mode==CameraMode.REMOTE && file.original) {
+                            if(remote.galleryActive && !remote.remoteSwitching && file.protocol==PROTOCOL_HTTP)
+                                matchCurrentFile(file,this.files)
+                            else null
+                        } else file
                     }
                     if(verified.isEmpty()) this
                     else {
@@ -1412,6 +1495,8 @@ class CompanionController(private val context: Context) {
                                         log={ message -> log(message,LogLevel.WARN,"GEOTAG") }) { out ->
                                         if(file.handle!=null) requireNotNull(sessionComputer).download(file,out,::progress)
                                         else requireNotNull(sessionHttp).stream(requireNotNull(resource).url) { response ->
+                                            if(isHttpOriginal && (response.code!=200 || response.header("Content-Range")!=null))
+                                                throw IOException("相机未返回完整原文件（HTTP ${response.code}）")
                                             val body=requireNotNull(response.body)
                                             // Prefer the HTTP Content-Length; when the listing size is unknown
                                             // it is the only validation available. Both absent means a chunked

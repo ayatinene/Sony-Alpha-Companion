@@ -217,6 +217,41 @@ class AvContentTransferTest {
         }
     }
 
+    @Test fun dateViewUsesCameraProvidedFolderUriAndParsesBrowsableDates() = runBlocking {
+        val dateUri = "storage:memoryCard1?path=2024-09-25"
+        val camera = FakeCamera { req ->
+            base(standardRows)(req) ?: when(req.getString("method")) {
+                "getContentCount" -> ok("""[{"count":1}]""",req.optInt("id"))
+                "getContentList" -> {
+                    val entry = if(req.getJSONArray("params").getJSONObject(0).getString("uri")=="storage:memoryCard1")
+                        """{"uri":"$dateUri","title":"2024-09-25","contentKind":"date","isBrowsable":"true"}"""
+                    else item("image:one","DSC00001.JPG","DSC00001.ARW")
+                    ok(page(entry),req.optInt("id"))
+                }
+                else -> null
+            }
+        }
+        MockWebServer().use { server ->
+            server.dispatcher=camera
+            CameraHttp().use { http ->
+                val av=transfer(server,http)
+                assertEquals(1,av.count("storage:memoryCard1",AvContentTransfer.VIEW_DATE))
+                val root=av.getContentPage("storage:memoryCard1",0,20,view=AvContentTransfer.VIEW_DATE)
+                val folder=root.items.single()
+                assertTrue(folder.isDateFolder)
+                assertEquals("2024-09-25",folder.name)
+                assertEquals(dateUri,folder.contentId)
+                assertTrue(folder.original.isEmpty())
+                val inner=av.getContentPage(folder.contentId,0,20,view=AvContentTransfer.VIEW_DATE)
+                assertFalse(inner.items.single().isDateFolder)
+                assertEquals(2,inner.items.single().original.size)
+                val reads=camera.requests.filter { it.getString("method") in setOf("getContentCount","getContentList") }
+                assertTrue(reads.all { it.getJSONArray("params").getJSONObject(0).getString("view")=="date" })
+                assertEquals(dateUri,reads.last().getJSONArray("params").getJSONObject(0).getString("uri"))
+            }
+        }
+    }
+
     @Test fun nameFallsBackToFirstOriginalWhenTopLevelNameAbsent() {
         val entry = parseAvContentItem(
             JSONObject("""{"uri":"u","contentKind":"still","content":{"original":[{"url":"http://cam/a.JPG","fileName":"a.JPG"}]}}"""),
