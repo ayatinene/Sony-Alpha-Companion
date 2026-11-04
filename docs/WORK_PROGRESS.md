@@ -2,13 +2,13 @@
 
 ## 当前构建与验证
 
-当前开发版本：`0.1.14-preview`（`versionCode 15`，完整正式 CI 构建与测试结果待运行后记录）。
+当前版本：`0.1.14-preview`（`versionCode 15`），对应源码提交 [`2104784`](https://github.com/ayatinene/Sony-Alpha-Companion/commit/2104784985a08a475e95b54ef21bd35dc683b3b4)：
 
-上一已完成验证基线：`0.1.13-preview`（`versionCode 14`），对应源码提交 [`877a43c`](https://github.com/ayatinene/Sony-Alpha-Companion/commit/877a43ccc69fea2f6127a0612edf9376846c6035)：
+- [Android Debug #41844807957](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/41844807957)：349 项 JVM 单元测试通过（42 个套件，0 失败 / 错误 / 跳过），Android Lint 0 错误、38 警告，固定签名 APK 构建与证书校验通过。
+- [APK 产物 #13331780429](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/41844807957/artifacts/13331780429)。
+- [Android 运行时检查 #41844807964](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/41844807964)：116 项 Android 测试通过（0 失败 / 错误 / 跳过）。
 
-- [Android Debug #41669506684](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/41669506684)：280 项 JVM 单元测试通过（38 个套件，0 失败 / 错误 / 跳过），Android Lint 0 错误、38 警告，固定签名 APK 构建与证书校验通过。
-- [APK 产物 #13247816663](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/41669506684/artifacts/13247816663)。
-- [Android 运行时检查 #41669506568](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/41669506568)：89 项 Android 测试通过（0 失败 / 错误 / 跳过）。
+上一已验证基线：`0.1.13-preview`（`versionCode 14`，提交 [`877a43c`](https://github.com/ayatinene/Sony-Alpha-Companion/commit/877a43ccc69fea2f6127a0612edf9376846c6035)）：280 项 JVM 测试（38 套件）与 89 项 Android 测试通过，Lint 0 错误、38 警告。
 
 ## 待完成事项
 

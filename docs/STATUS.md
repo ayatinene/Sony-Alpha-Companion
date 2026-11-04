@@ -6,8 +6,8 @@
 ## 测试状态
 
 - 自动化测试与构建：
-  - 上一已验证正式 CI 基线（`0.1.13-preview`，提交 `877a43c`）：JVM 单元测试 280 项通过（38 个套件，0 失败 / 错误 / 跳过），Android 运行时测试 89 项通过（0 失败 / 错误 / 跳过），Android Lint 0 错误、38 警告，固定签名 APK 构建与证书指纹校验通过。
-  - `0.1.14-preview`（`versionCode 15`）新增 `avContent` 协议层与遥控同连接图库相关测试，完整正式 CI 结果待本轮构建运行完成后更新。
+  - `0.1.14-preview`（`versionCode 15`，提交 `2104784`）：JVM 单元测试 349 项通过（42 个套件，0 失败 / 错误 / 跳过），Android 运行时测试 116 项通过（0 失败 / 错误 / 跳过），Android Lint 0 错误、38 警告，固定签名 APK 构建与证书指纹校验通过（[Android Debug #41844807957](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/41844807957)、[Android 运行时检查 #41844807964](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/41844807964)）。
+  - 上一已验证基线 `0.1.13-preview`（提交 `877a43c`）：JVM 单元测试 280 项（38 个套件）与 Android 运行时测试 89 项通过，Lint 0 错误、38 警告。
 - 实机测试：
   - 遥控拍摄与传统 JPEG 传图（Send to Smartphone）主流程已在 α7R II 上实测可用，无明显问题（属总体测试结果，不代表每个子项边界已逐一覆盖）。
   - 遥控同热点内容传输（`avContent`）原厂协议实测：早期实测曾记录机内 Smart Remote 返回 `3.21`（API 1.0，当时曝光参数仅开放 EV）；最新在原厂 α7R II 环境（未修改或重装相机 APK）通过命令行请求实测时未保存 `getApplicationInfo` 返回值，确切机内应用版本未知（既不能推断 `3.21` 不支持该能力，也不能推断机内应用已升级）。实测证实：
