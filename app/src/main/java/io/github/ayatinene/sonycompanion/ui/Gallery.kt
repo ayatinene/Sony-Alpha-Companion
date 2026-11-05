@@ -101,7 +101,7 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     // The photo dialog dismisses itself. Back in a directory returns one level instead of
     // leaving the camera gallery; no connection restart is involved.
     BackHandler(enabled=state.galleryPath.isNotEmpty() && preview==null && detail==null &&
-        !state.busy && !state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore) {
+        !state.busy && !state.transferring && !state.remote.remoteSwitching) {
         actions.up()
     }
     LaunchedEffect(returning) { if (returning) wasReturning = true }
@@ -170,14 +170,14 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal=12.dp), verticalAlignment=Alignment.CenterVertically) {
             if (state.galleryPath.isNotEmpty()) IconButton(onClick=actions.up,
-                enabled=!state.busy && !state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore) {
+                enabled=!state.busy && !state.transferring && !state.remote.remoteSwitching) {
                 Icon(Icons.Outlined.ArrowBack, "返回上一级")
             }
             if (state.mode == CameraMode.JPEG) IconButton(onClick=actions.root, enabled=!state.busy && !state.transferring) { Icon(Icons.Outlined.FolderOpen, "返回根目录") }
             Text(if (remote) "已连接 · 相机图库" else "相机图库", Modifier.weight(1f), style=MaterialTheme.typography.titleSmall, maxLines=1, overflow=TextOverflow.Ellipsis)
             if (remote) TextButton(
                 onClick={ returnFailed=false; actions.returnToCapture() },
-                enabled=!state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore && !state.busy,
+                enabled=!state.transferring && !state.remote.remoteSwitching && !state.busy,
                 modifier=Modifier.testTag("remote-gallery-return")) {
                 Text(if (returning) "正在返回拍摄…" else "返回拍摄")
             }
@@ -393,10 +393,10 @@ private fun gallerySecondaryText(file: CameraFile): String = if (file.container)
                 Text("正在加载…", style=MaterialTheme.typography.labelMedium)
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
-            state.remote.hasMoreFiles -> {
-                if (state.remote.loadMoreFailed) Text("加载更多失败，请重试。", style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.error)
+            state.remote.loadMoreFailed && state.remote.hasMoreFiles -> {
+                Text("加载更多失败，请重试。", style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.error)
                 TextButton(onClick=actions.loadMore,
-                    enabled=!state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore) { Text("加载更多（20 项）") }
+                    enabled=!state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore) { Text("重试") }
             }
         }
     }

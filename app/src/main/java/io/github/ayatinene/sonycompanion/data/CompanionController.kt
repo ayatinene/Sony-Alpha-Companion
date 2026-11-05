@@ -971,6 +971,7 @@ class CompanionController(private val context: Context) {
         }
         log("相机图库已就绪 source=$source total=$total loaded=${pager.contentLoaded} more=${pager.hasMore}",tag="GALLERY")
         refreshGalleryQueue(gen,camera)
+        loadRemainingRemotePages(camera,av,pager,gen)
     }
     private suspend fun openGallerySource(av: AvContentTransfer): String {
         val schemes=bestEffortValue { retryNotAvailableNow { av.schemes() } }.orEmpty()
@@ -1045,39 +1046,75 @@ class CompanionController(private val context: Context) {
         }
         return false
     }
-    /** Loads the next avContent page for the current source and appends it in camera (descending) order. */
+    /**
+     * Automatically load the current root/date directory in bounded 20-item requests.
+     * The first page has already been published. A new directory or capture return cancels
+     * galleryJob; old workers must never overwrite the new view or its loading state.
+     */
+    private suspend fun loadRemainingRemotePages(
+        camera: RemoteCamera, av: AvContentTransfer, pager: GalleryPager, gen: Long
+    ) {
+        val source=pager.source ?: return
+        val worker=coroutineContext[Job]
+        if(!pager.hasMore) return
+        whenGeneration(gen) {
+            if(remote===camera && avContent===av && galleryPager===pager && galleryJob===worker)
+                update { copy(remote=remote.copy(loadingMore=true,loadMoreFailed=false)) }
+        }
+        try {
+            while(pager.hasMore && ownsCamera(camera,gen) && galleryJob===worker &&
+                avContent===av && galleryPager===pager) {
+                val page=retryNotAvailableNow {
+                    av.getContentPage(source,pager.nextStart,pager.pageSize,view=AvContentTransfer.VIEW_DATE)
+                }
+                val fresh=pager.accept(page)
+                val files=fresh.flatMap { it.toCameraFiles() }
+                whenGeneration(gen) {
+                    if(remote===camera && avContent===av && galleryPager===pager && galleryJob===worker)
+                        update { copy(files=this.files+files,
+                            remote=remote.copy(loadingMore=pager.hasMore,loadMoreFailed=false,
+                                hasMoreFiles=pager.hasMore,totalFiles=pager.total,
+                                loadedContentCount=pager.contentLoaded)) }
+                }
+                refreshGalleryQueue(gen,camera)
+            }
+        } catch(e: CancellationException) { throw e }
+        catch(e: Exception) {
+            log("自动加载相机目录失败：${e.message}",LogLevel.ERROR,"GALLERY",e)
+            whenGeneration(gen) {
+                if(remote===camera && avContent===av && galleryPager===pager && galleryJob===worker)
+                    update { copy(remote=remote.copy(loadingMore=false,loadMoreFailed=true),
+                        error="加载更多失败，请重试。") }
+            }
+        } finally {
+            withContext(NonCancellable) {
+                whenGeneration(gen) {
+                    if(remote===camera && avContent===av && galleryPager===pager && galleryJob===worker)
+                        update { copy(remote=remote.copy(loadingMore=false)) }
+                }
+            }
+        }
+    }
+
+    /** Only a failed automatic page can be retried manually. */
     fun loadMoreRemoteFiles() {
         val snapshot=state.value
         val camera=remote ?: return
         val av=avContent ?: return
         val pager=galleryPager ?: return
-        val source=pager.source ?: return
-        if(snapshot.mode!=CameraMode.REMOTE || !snapshot.connected) return
-        if(!snapshot.remote.galleryActive || snapshot.remote.remoteSwitching) return
-        if(snapshot.remote.loadingMore || !pager.hasMore) return
-        if(snapshot.transferring) { update { copy(message="下载进行中，暂不加载更多") }; return }
+        if(snapshot.mode!=CameraMode.REMOTE || !snapshot.connected || !snapshot.remote.galleryActive ||
+            snapshot.remote.remoteSwitching || snapshot.remote.loadingMore || !snapshot.remote.loadMoreFailed ||
+            !pager.hasMore || snapshot.transferring) return
         val gen=snapshot.sessionGeneration
         val latched=identity.locked {
-            if(identity.currentGeneration==gen && remote===camera && avContent===av) { update { copy(remote=remote.copy(loadingMore=true, loadMoreFailed=false)) }; true } else false
+            if(identity.currentGeneration==gen && remote===camera && avContent===av && galleryPager===pager) {
+                update { copy(remote=remote.copy(loadingMore=true,loadMoreFailed=false),error=null) }
+                true
+            } else false
         }
         if(!latched) return
-        galleryJob=scope.launch {
-            try {
-                val page=retryNotAvailableNow { av.getContentPage(source,pager.nextStart,pager.pageSize,view=AvContentTransfer.VIEW_DATE) }
-                val fresh=pager.accept(page)
-                val files=fresh.flatMap { it.toCameraFiles() }
-                whenGeneration(gen) {
-                    if(remote!==camera) return@whenGeneration
-                    update { copy(files=this.files+files, remote=remote.copy(loadingMore=false, loadMoreFailed=false,
-                        hasMoreFiles=pager.hasMore, totalFiles=pager.total, loadedContentCount=pager.contentLoaded)) }
-                }
-                refreshGalleryQueue(gen,camera)
-            } catch(e: CancellationException) { throw e }
-            catch(e: Exception) {
-                log("加载更多失败：${e.message}",LogLevel.ERROR,"GALLERY",e)
-                whenGeneration(gen) { if(remote===camera) update { copy(remote=remote.copy(loadingMore=false, loadMoreFailed=true), error="加载更多失败，请重试。") } }
-            }
-        }
+        galleryJob?.cancel()
+        galleryJob=scope.launch { loadRemainingRemotePages(camera,av,pager,gen) }
     }
     /** Unified refresh entry: reloads the remote gallery page, a JPEG folder, or the RAW scan. A gallery
      * whose entry failed (galleryActive but no client yet) is retried through the same open path. */
@@ -1105,9 +1142,9 @@ class CompanionController(private val context: Context) {
         if(!latched) return
         galleryJob=scope.launch {
             try {
-                val total=bestEffortValue { retryNotAvailableNow { av.count(source) } }?.takeIf { it>=0 }
+                val total=bestEffortValue { retryNotAvailableNow { av.count(source,AvContentTransfer.VIEW_DATE) } }?.takeIf { it>=0 }
                 pager.begin(source,total)
-                val page=retryNotAvailableNow { av.getContentPage(source,0,pager.pageSize) }
+                val page=retryNotAvailableNow { av.getContentPage(source,0,pager.pageSize,view=AvContentTransfer.VIEW_DATE) }
                 val fresh=pager.accept(page)
                 val files=fresh.flatMap { it.toCameraFiles() }
                 whenGeneration(gen) {
@@ -1116,6 +1153,7 @@ class CompanionController(private val context: Context) {
                         remote=remote.copy(loadingMore=false, loadMoreFailed=false, hasMoreFiles=pager.hasMore, totalFiles=pager.total, loadedContentCount=pager.contentLoaded)) }
                 }
                 refreshGalleryQueue(gen,camera)
+                loadRemainingRemotePages(camera,av,pager,gen)
             } catch(e: CancellationException) { throw e }
             catch(e: Exception) {
                 log("刷新相机图库失败：${e.message}",LogLevel.ERROR,"GALLERY",e)
@@ -1250,7 +1288,7 @@ class CompanionController(private val context: Context) {
         val av=avContent ?: return
         val root=avContentSource ?: return
         if(!snapshot.connected || snapshot.mode!=CameraMode.REMOTE || !snapshot.remote.galleryActive ||
-            snapshot.remote.remoteSwitching || snapshot.remote.loadingMore || snapshot.busy || snapshot.transferring) return
+            snapshot.remote.remoteSwitching || snapshot.busy || snapshot.transferring) return
         if(id!=root && !(snapshot.folder==root && snapshot.files.any { it.container && it.id==id })) return
         val gen=snapshot.sessionGeneration
         val latched=identity.locked {
@@ -1276,6 +1314,7 @@ class CompanionController(private val context: Context) {
                             totalFiles=pager.total,loadedContentCount=pager.contentLoaded)) }
                 }
                 refreshGalleryQueue(gen,camera)
+                loadRemainingRemotePages(camera,av,pager,gen)
             } catch(e: CancellationException) { throw e }
             catch(e: Exception) {
                 log("读取日期目录失败：${e.message}",LogLevel.ERROR,"GALLERY",e)

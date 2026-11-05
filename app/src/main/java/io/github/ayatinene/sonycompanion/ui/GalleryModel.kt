@@ -113,19 +113,23 @@ private fun naturalNameDescendingThenId(a: CameraFile, b: CameraFile): Int {
     return naturalNameThenId(a, b)
 }
 
-/** The only folder-name form treated as a date: the confirmed camera "Date" title `yyyy-MM-dd`. */
+/** JPEG folders use yyyy-MM-dd; Sony avContent date folders use yyyyMMdd. */
 private val folderDateFormatter = DateTimeFormatter.ISO_LOCAL_DATE
+private val sonyFolderDateFormatter = DateTimeFormatter.BASIC_ISO_DATE
 
 /**
- * Strict date-only parse of a "Date" folder title. Only the confirmed `yyyy-MM-dd` shape is accepted,
- * so a bare digit run, a camera directory such as `100MSDCF` or any other name is unknown and never
- * invents a time. Impossible days/months are rejected by strict resolution.
+ * Strict parse of both observed camera "Date" title forms: yyyy-MM-dd and yyyyMMdd.
+ * Other numeric strings, directory names, and impossible dates stay unknown.
  */
 internal fun folderDateMillis(name: String, zone: ZoneId = ZoneId.systemDefault()): Long? {
     val text = name.trim()
-    if (text.length != 10) return null
+    val formatter=when {
+        text.length==10 && text[4]=='-' && text[7]=='-' -> folderDateFormatter
+        text.length==8 && text.all { it in '0'..'9' } -> sonyFolderDateFormatter
+        else -> return null
+    }
     return try {
-        LocalDate.parse(text, folderDateFormatter).atStartOfDay(zone).toInstant().toEpochMilli()
+        LocalDate.parse(text, formatter).atStartOfDay(zone).toInstant().toEpochMilli()
     } catch (_: DateTimeException) { null }
 }
 

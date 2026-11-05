@@ -191,7 +191,7 @@ class RemoteGalleryIntegrationTest {
         }
     }
 
-    @Test fun loadMoreAppendsTheNextPage() {
+    @Test fun selectingDateAutomaticallyLoadsEveryPage() {
         MockWebServer().use { server ->
             val camera=GalleryCamera(server)
             connectGallery(server,camera)
@@ -201,16 +201,13 @@ class RemoteGalleryIntegrationTest {
             val folder=controller.state.value.files.single()
             assertTrue(folder.container)
             controller.browse(folder.id)
-            waitUntil { controller.state.value.folder==folder.id && !controller.state.value.remote.loadingMore }
-            assertEquals(20,controller.state.value.files.size)
-            assertTrue(controller.state.value.remote.hasMoreFiles)
-            controller.loadMoreRemoteFiles()
-            waitUntil { controller.state.value.files.size==40 }
-            assertTrue(controller.state.value.remote.hasMoreFiles)
-            controller.loadMoreRemoteFiles()
-            waitUntil { controller.state.value.files.size==45 }
+            waitUntil(20_000) {
+                controller.state.value.folder==folder.id &&
+                    controller.state.value.files.size==45 && !controller.state.value.remote.loadingMore
+            }
             assertFalse("the declared count is reached",controller.state.value.remote.hasMoreFiles)
             assertEquals(45,controller.state.value.remote.loadedContentCount)
+            assertFalse(controller.state.value.remote.loadMoreFailed)
             controller.up()
             waitUntil { controller.state.value.folder=="storage:memorycard1" && !controller.state.value.remote.loadingMore }
             assertEquals(listOf("2026-01-02"),controller.state.value.files.map { it.name })
@@ -230,7 +227,7 @@ class RemoteGalleryIntegrationTest {
             controller.returnToRemoteCapture()
             waitUntil { !controller.state.value.remote.galleryActive }
             assertFalse(controller.state.value.remote.remoteSwitching)
-            waitUntil { camera.calls.count { it=="startLiveview" }>liveViewsBefore }
+            waitUntil(20_000) { camera.calls.count { it=="startLiveview" }>liveViewsBefore }
         }
     }
 }
