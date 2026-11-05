@@ -289,7 +289,10 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
                             if (file.id in selectedVisible) Icon(Icons.Outlined.CheckCircle, "已选择", Modifier.align(Alignment.TopEnd).padding(6.dp), tint=MaterialTheme.colorScheme.primary)
                         }
                         Text(file.name, Modifier.padding(horizontal=8.dp, vertical=4.dp), style=MaterialTheme.typography.labelMedium, maxLines=1, overflow=TextOverflow.Ellipsis)
-                        Text(if (file.container) "文件夹" else (if (file.raw) "ARW · " else "JPEG · ")+bytes(effectiveFileSize(file)), Modifier.padding(start=8.dp, end=8.dp, bottom=8.dp), style=MaterialTheme.typography.labelSmall)
+                        Text(if (file.container) "文件夹" else listOfNotNull(
+                            if (file.raw) "ARW" else "JPEG",
+                            effectiveFileSize(file).takeIf { it > 0 }?.let(::bytes)
+                        ).joinToString(" · "), Modifier.padding(start=8.dp, end=8.dp, bottom=8.dp), style=MaterialTheme.typography.labelSmall)
                     }
                 }
                 if (remote) item(span={ GridItemSpan(maxLineSpan) }) { RemoteLoadMore(state, actions) }
@@ -358,7 +361,10 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     detail?.let { file -> AlertDialog(onDismissRequest={ detail = null }, title={ Text(file.name) }, text={
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement=Arrangement.spacedBy(8.dp)) {
             galleryTimeText(file.date)?.let { Text(it) }
-            if (file.hasOriginalFile) Text("${if (file.raw) "ARW 原文件" else "JPEG 原文件"} · ${bytes(file.size)}")
+            if (file.hasOriginalFile) Text(listOfNotNull(
+                if (file.raw) "ARW 原文件" else "JPEG 原文件",
+                effectiveFileSize(file).takeIf { it > 0 }?.let(::bytes)
+            ).joinToString(" · "))
             else {
                 if (file.raw) Text("此 ARW 条目提供的可下载资源为 JPEG 预览。")
                 file.resources.filter { it.isJpeg }.distinctBy { it.url }.forEach { resource ->
@@ -378,7 +384,8 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
 
 /** Format · size · local capture time for the list row; the time is omitted when it cannot be read. */
 private fun gallerySecondaryText(file: CameraFile): String = if (file.container) "文件夹"
-    else listOfNotNull(if (file.raw) "ARW" else "JPEG", bytes(effectiveFileSize(file)), galleryTimeText(file.date)).joinToString(" · ")
+    else listOfNotNull(if (file.raw) "ARW" else "JPEG",
+        effectiveFileSize(file).takeIf { it > 0 }?.let(::bytes), galleryTimeText(file.date)).joinToString(" · ")
 
 /** Footer for the remote gallery: how much is loaded, the next-page entry, and a retry after a failed page. */
 @Composable private fun RemoteLoadMore(state: AppState, actions: GalleryActions) {
@@ -455,7 +462,9 @@ private fun gallerySecondaryText(file: CameraFile): String = if (file.container)
         if (active != null) {
             if (active.total > 0) LinearProgressIndicator(progress={ (active.received.toFloat()/active.total).coerceIn(0f, 1f) }, modifier=Modifier.fillMaxWidth())
             else LinearProgressIndicator(Modifier.fillMaxWidth())
-            Text("${bytes(active.received)} / ${bytes(active.total)}", style=MaterialTheme.typography.labelSmall)
+            Text(if (active.total > 0) "${if(active.received > 0) bytes(active.received) else "0 B"} / ${bytes(active.total)}"
+                else if (active.received > 0) "已接收 ${bytes(active.received)}" else "正在下载…",
+                style=MaterialTheme.typography.labelSmall)
         }
         if (expanded) {
             Column(Modifier.heightIn(max=180.dp).verticalScroll(rememberScrollState())) { state.queue.takeLast(50).forEach { item -> Text("${item.file.name} · ${item.state}${item.error?.let { "\n$it" } ?: ""}", style=MaterialTheme.typography.bodySmall, modifier=Modifier.padding(vertical=4.dp)) } }

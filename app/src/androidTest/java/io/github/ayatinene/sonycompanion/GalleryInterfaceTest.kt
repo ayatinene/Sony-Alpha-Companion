@@ -273,9 +273,21 @@ class GalleryInterfaceTest {
         compose.onNodeWithTag("gallery-list").assertExists()
         compose.onNodeWithTag("gallery-grid").assertDoesNotExist()
         compose.onNodeWithText("a").assertExists()
-        compose.onNodeWithText("ARW · 未知大小",substring=true).assertExists()
+        compose.onNodeWithText("ARW · 未知大小",substring=true).assertDoesNotExist()
         compose.onNodeWithContentDescription("照片信息 a").assertExists()
         compose.onNodeWithContentDescription("切换为网格").assertExists()
+    }
+
+    @Test fun filesWithNoReportedSizeDoNotDisplayUnknownSizeAnywhere() {
+        val original=CameraFile("original","DSC00001.ARW",raw=true,original=true,
+            protocol=PROTOCOL_HTTP,format="arw",size=0)
+        var state by mutableStateOf(remoteGallery(listOf(original),
+            RemoteState(canBrowseGallery=true,loadedContentCount=1,totalFiles=1)))
+        compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions()) } }
+        compose.onNodeWithText("未知大小",substring=true).assertDoesNotExist()
+        compose.onNodeWithContentDescription("照片信息 DSC00001.ARW").performClick()
+        compose.onNodeWithText("ARW 原文件").assertExists()
+        compose.onNodeWithText("未知大小",substring=true).assertDoesNotExist()
     }
 
     @Test fun folderRowsHaveNoInfoButton() {
@@ -520,13 +532,14 @@ class GalleryInterfaceTest {
         compose.onNodeWithTag("remote-gallery-returning").assertDoesNotExist()
     }
 
-    @Test fun loadedCountUsesTheContentItemCountAndOffersTheNextPage() {
+    @Test fun loadedCountUsesContentItemCountWithoutManualPagination() {
         val loads=mutableListOf<Unit>()
         render(remoteGallery(listOf(rawFile("a")),RemoteState(canBrowseGallery=true,loadedContentCount=20,totalFiles=40,hasMoreFiles=true)),
             GalleryActions(loadMore={loads+=Unit}))
         compose.onNodeWithText("已加载 20 / 40 项").assertExists()
-        compose.onNodeWithText("加载更多（20 项）").performClick()
-        compose.runOnIdle { assertEquals(1,loads.size) }
+        compose.onNodeWithText("加载更多（20 项）").assertDoesNotExist()
+        compose.onNodeWithText("重试").assertDoesNotExist()
+        compose.runOnIdle { assertTrue(loads.isEmpty()) }
     }
 
     @Test fun anUnknownTotalIsReportedAsTheRecentCountWithoutInventingOne() {
@@ -587,11 +600,11 @@ class GalleryInterfaceTest {
         compose.runOnIdle { assertEquals(1,reconnects.size) }
     }
 
-    @Test fun theReturnButtonIsAlsoBlockedWhileLoadingOrBusy() {
+    @Test fun returnAllowsBackgroundPaginationButBlocksBusyState() {
         val loading=remoteGallery(listOf(rawFile("a")),RemoteState(canBrowseGallery=true,loadedContentCount=1,loadingMore=true))
         var state by mutableStateOf(loading)
         compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions()) } }
-        compose.onNodeWithTag("remote-gallery-return").assertIsNotEnabled()
+        compose.onNodeWithTag("remote-gallery-return").assertIsEnabled()
         compose.runOnIdle { state=state.copy(remote=state.remote.copy(loadingMore=false),busy=true) }
         compose.onNodeWithTag("remote-gallery-return").assertIsNotEnabled()
     }
@@ -612,12 +625,13 @@ class GalleryInterfaceTest {
         compose.onNodeWithText("无法读取相机文件，请重试或返回拍摄。").assertDoesNotExist()
     }
 
-    @Test fun aFirstPageWithoutSupportedFilesStillOffersTheNextPage() {
+    @Test fun unsupportedFirstPageContinuesAutoLoadingWithoutManualButton() {
         // The first page held only unsupported content (movie / no original): not an error, keep loading.
         render(remoteGallery(emptyList(),RemoteState(canBrowseGallery=true,loadedContentCount=20,totalFiles=40,hasMoreFiles=true)))
         compose.onNodeWithText("没有可显示的照片").assertExists()
         compose.onNodeWithText("无法读取相机文件，请重试或返回拍摄。").assertDoesNotExist()
-        compose.onNodeWithText("加载更多（20 项）").assertExists()
+        compose.onNodeWithText("加载更多（20 项）").assertDoesNotExist()
+        compose.onNodeWithText("已加载 20 / 40 项").assertExists()
     }
 
     @Test fun anUnknownCountEmptyPageIsNotAnError() {
@@ -628,18 +642,21 @@ class GalleryInterfaceTest {
         compose.onNodeWithText("加载更多（20 项）").assertDoesNotExist()
     }
 
-    @Test fun aFailedPageWithExistingFilesOffersAConciseFooterRetry() {
+    @Test fun failedAutomaticPageOffersManualRetry() {
+        val retries=mutableListOf<Unit>()
         var state by mutableStateOf(remoteGallery(listOf(rawFile("a")),RemoteState(canBrowseGallery=true,loadedContentCount=1,totalFiles=40,hasMoreFiles=true)))
-        compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions()) } }
+        compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions(loadMore={retries+=Unit})) } }
         compose.onNodeWithText("加载更多失败，请重试。").assertDoesNotExist()
         compose.runOnIdle { state=state.copy(remote=state.remote.copy(loadMoreFailed=true),error="加载更多失败，请重试。") }
         compose.onNodeWithText("加载更多失败，请重试。").assertExists()
-        compose.onNodeWithText("加载更多（20 项）").assertExists()
+        compose.onNodeWithText("重试").performClick()
+        compose.runOnIdle { assertEquals(1,retries.size) }
     }
 
-    @Test fun theLoadMoreButtonIsBlockedWhileTransferring() {
-        render(remoteGallery(listOf(rawFile("a")),RemoteState(canBrowseGallery=true,loadedContentCount=1,totalFiles=40,hasMoreFiles=true)).copy(transferring=true))
-        compose.onNodeWithText("加载更多（20 项）").assertIsNotEnabled()
+    @Test fun paginationRetryIsBlockedWhileTransferring() {
+        render(remoteGallery(listOf(rawFile("a")),RemoteState(canBrowseGallery=true,
+            loadedContentCount=1,totalFiles=40,hasMoreFiles=true,loadMoreFailed=true)).copy(transferring=true))
+        compose.onNodeWithText("重试").assertIsNotEnabled()
     }
 
     @Test fun aModeEpochChangeClearsSelectionAndPreview() {
