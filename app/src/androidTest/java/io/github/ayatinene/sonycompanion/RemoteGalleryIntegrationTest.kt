@@ -221,11 +221,11 @@ class RemoteGalleryIntegrationTest {
             val camera=GalleryCamera(server)
             connectGallery(server,camera,visible=true)
             controller.openRemoteGallery()
-            waitUntil { controller.state.value.remote.galleryActive && !controller.state.value.remote.remoteSwitching }
+            waitUntil(20_000) { controller.state.value.remote.galleryActive && !controller.state.value.remote.remoteSwitching }
             camera.cameraFunctionFails=true
             val liveViewsBefore=camera.calls.count { it=="startLiveview" }
             controller.returnToRemoteCapture()
-            waitUntil { !controller.state.value.remote.galleryActive }
+            waitUntil(20_000) { !controller.state.value.remote.galleryActive }
             assertFalse(controller.state.value.remote.remoteSwitching)
             waitUntil(20_000) { camera.calls.count { it=="startLiveview" }>liveViewsBefore }
         }

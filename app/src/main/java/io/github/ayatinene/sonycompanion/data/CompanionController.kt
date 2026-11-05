@@ -923,9 +923,14 @@ class CompanionController(private val context: Context) {
             } else false
         }
         if(!latched) return
-        galleryJob?.cancel()
+        val previousGalleryJob=galleryJob
+        previousGalleryJob?.cancel()
         galleryJob=scope.launch {
-            try { switchToGallery(camera,endpoint,gen,retry) }
+            try {
+                // The prior HTTP read must be finished before another function switch starts.
+                withTimeout(GALLERY_SWITCH_TIMEOUT_MILLIS) { previousGalleryJob?.join() }
+                switchToGallery(camera,endpoint,gen,retry)
+            }
             catch(e: CancellationException) { throw e }
             catch(e: Exception) {
                 log("进入相机图库失败：${e.message}",LogLevel.ERROR,"GALLERY",e)
@@ -1181,9 +1186,13 @@ class CompanionController(private val context: Context) {
             } else false
         }
         if(!latched) return
-        galleryJob?.cancel()
+        val previousGalleryJob=galleryJob
+        previousGalleryJob?.cancel()
         galleryJob=scope.launch {
             try {
+                // Automatic pagination can still be reading the storage service. Never
+                // switch to Remote Shooting until its request has actually finished.
+                withTimeout(GALLERY_SWITCH_TIMEOUT_MILLIS) { previousGalleryJob?.join() }
                 val job=queueJob
                 if(job!=null && job.isActive) withTimeoutOrNull(GALLERY_SWITCH_TIMEOUT_MILLIS) { job.join() }
                 if(state.value.transferring) throw IllegalStateException("下载仍在进行，已取消返回拍摄")
@@ -1298,9 +1307,12 @@ class CompanionController(private val context: Context) {
             } else false
         }
         if(!latched) return
-        galleryJob?.cancel()
+        val previousGalleryJob=galleryJob
+        previousGalleryJob?.cancel()
         galleryJob=scope.launch {
             try {
+                // Cancellation alone does not prove a synchronous HTTP read is released.
+                withTimeout(GALLERY_SWITCH_TIMEOUT_MILLIS) { previousGalleryJob?.join() }
                 val total=bestEffortValue { retryNotAvailableNow { av.count(id,AvContentTransfer.VIEW_DATE) } }?.takeIf { it>=0 }
                 val pager=GalleryPager(AvContentTransfer.DEFAULT_PAGE_SIZE)
                 pager.begin(id,total)

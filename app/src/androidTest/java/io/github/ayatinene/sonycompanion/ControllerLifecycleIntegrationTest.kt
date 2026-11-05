@@ -208,7 +208,11 @@ class ControllerLifecycleIntegrationTest {
                 first.enqueue(MockResponse().setBody(emptyPage()))
                 controller.sessionOverride=CompanionController.SessionOverride(firstHttp,listOf(jpegDevice(first,false)))
                 assertTrue(controller.connect(CameraMode.JPEG))
-                waitUntil { controller.state.value.connected }
+                // Publishing 'connected' precedes connect()'s finally block; a second
+                // connect launched at that instant is legitimately rejected while the
+                // first connectionJob is still active. Wait until it has fully settled.
+                waitUntil { controller.state.value.connected &&
+                    !controller.state.value.connecting && !controller.state.value.busy }
                 val firstBefore=first.requestCount
                 val generationBefore=controller.state.value.sessionGeneration
                 val secondDevice=jpegDevice(second,false)
