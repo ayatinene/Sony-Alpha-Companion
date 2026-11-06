@@ -363,8 +363,8 @@ class CompanionController(private val context: Context) {
                         update { copy(message="等待 Android 确认连接相机 Wi-Fi…") }
                         val pairGen=gen
                         lateinit var lease: PairingConnection<Network>
-                        lease=PairingConnection(pairingBackend) { lost -> scope.launch {
-                            if(identity.currentGeneration!=pairGen || pairingConnection!==lease) return@launch
+                        lease=PairingConnection(pairingBackend) { _ -> scope.launch pairedLoss@{
+                            if(identity.currentGeneration!=pairGen || pairingConnection!==lease) return@pairedLoss
                             disconnect(false)
                             if(identity.currentGeneration==pairGen+1) update { copy(error="相机 Wi-Fi 已断开，请重新配对",message="连接已断开") }
                         } }
@@ -431,12 +431,15 @@ class CompanionController(private val context: Context) {
                         startScan()
                     } else {
                         val devices = testOverride?.devices
-                            ?: if(credentials!=null) discoverPairedCamera {
-                                networks.discover(network!!,transport,true,"")
+                            ?: if(credentials!=null) {
+                                withTimeoutOrNull(20_000) {
+                                    discoverPairedCamera { networks.discover(network!!,transport,true,"") }
+                                } ?: throw IOException("Wi-Fi 已连接，但查找 REMOTE 服务超时，请确认相机已打开智能遥控")
                             } else networks.discover(network!!,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
                         if(identity.currentGeneration!=gen) { attempt.abortAll(); return@launch }
                         require(devices.size==1) {
-                            if(devices.isEmpty()) "没有发现相机。请确认相机工作模式、Wi-Fi 和附近设备权限，或在设置填写描述文件 URL。"
+                            if(devices.isEmpty() && credentials!=null) "Wi-Fi 已连接，但没有发现 REMOTE 服务，请确认相机已打开智能遥控。"
+                            else if(devices.isEmpty()) "没有发现相机。请确认相机工作模式、Wi-Fi 和附近设备权限，或在设置填写描述文件 URL。"
                             else "发现多个相机，请在设置填写目标相机的描述文件 URL"
                         }
                         val device=devices.single(); log("发现 ${device.model} ${device.description} remote=${device.remote} content=${device.content} push=${device.push}",tag="CONNECT")

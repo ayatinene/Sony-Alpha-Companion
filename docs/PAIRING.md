@@ -15,7 +15,7 @@ performed. Mobile data remains the default internet route where the platform sup
 on single-STA phones Android may replace the existing Wi-Fi. Internet/Wi-Fi concurrency is not guaranteed.
 
 Wi-Fi approval/connection and REMOTE readiness are separate states. Discovery retries up to three
-four-second SSDP rounds with 750 ms gaps. Credentials never override the manual descriptor URL
+four-second SSDP rounds with 750 ms gaps and a 20-second overall paired-discovery limit. Credentials never override the manual descriptor URL
 setting for other modes; paired discovery deliberately ignores that setting. After finding exactly
 one REMOTE service, the existing RemoteCamera initialization, SessionIdentity, queues and UI navigation
 are reused. API failure never reports pairing/session success.
@@ -37,7 +37,8 @@ that drops the local network triggers session disconnection and requires a new u
 ## APK evidence (supplied Imaging Edge Mobile 7.8.6)
 
 The APKS contains base.apk plus arm64-v8a, ms, zh, xhdpi and xxxhdpi splits. The base DEX files
-contain the protocol logic. Analysis used DEX instruction inspection and Androguard DAD decompilation.
+contain the protocol logic. The supplied base.apk SHA-256 is
+`c466640e136e2fe4bc1a50a3ab995d028c96f71921b5f973594a7a7114ec3501`. Analysis used DEX instruction inspection and Androguard DAD decompilation.
 This implementation is independently written; no Sony classes, binaries, assets or decompiled source
 are incorporated in the app.
 
@@ -47,7 +48,9 @@ are incorporated in the app.
   confirms version 1, S/P/C/M field markers, `DIRECT-` + S + `:` + C, and escaping `; , : \\`.
 - `qr.QrReaderCallbackController.checkQrString` validates S length four and P length eight before
   constructing WifiQrData. Its WifiQrData stores version, prefix, friendly name and password;
-  `getSsid()` delegates to QrDataUtil. The observed ILCE-7RM2 SSID matches this rule.
+  `getSsid()` delegates to QrDataUtil. The QR was also decoded directly from the supplied camera photograph and passed through the
+  independently implemented Kotlin parser; its resulting SSID matches the observed ILCE-7RM2 network.
+  The actual password/raw payload stayed out of test output and repository fixtures.
 - M is recognized by QrDataUtil but is not used by that WifiQrData construction path. No evidence
   here establishes it as the AP BSSID or an application-level authentication token. Companion validates
   an optional 12-hex M but neither connects by that address nor treats it as camera identity.

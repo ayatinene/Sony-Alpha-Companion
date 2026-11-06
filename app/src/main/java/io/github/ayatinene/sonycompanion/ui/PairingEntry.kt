@@ -61,7 +61,7 @@ internal fun rememberPairingActions(model: CompanionViewModel, onConnecting: () 
         val missing = required.filter { !isPermissionGranted(context, it) }
         if (missing.isNotEmpty()) {
             model.pairingPermissionPending = true
-            permissions.launch(missing)
+            permissions.launch(required) // API 31+ requires coarse and fine in the same request.
         } else {
             model.pairingInput = null
             if (model.controller.pairCamera(credentials)) latestConnecting()

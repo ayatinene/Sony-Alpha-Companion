@@ -83,6 +83,35 @@ class PairingIntegrationTest {
             assertFalse(controller.state.value.connected)
         }
     }
+    @Test fun activityStopAndRecreationPreservePendingWifiUntilExplicitCancel() {
+        val backend=Backend();controller.pairingBackend=backend
+        androidx.test.core.app.ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { assertTrue(controller.pairCamera(credentials)) }
+            waitFor { backend.events!=null }
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+            assertEquals(0,backend.releases.get())
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            scenario.recreate()
+            assertEquals(0,backend.releases.get())
+            scenario.onActivity { controller.cancelPairing() }
+            waitFor { backend.releases.get()==1 }
+            assertFalse(controller.state.value.connected)
+        }
+    }
+    @Test fun losingApprovedWifiTerminatesOnlyItsRemoteSession() {
+        MockWebServer().use { server ->
+            initialize(server);val http=override(server)
+            val backend=Backend();controller.pairingBackend=backend
+            controller.pairCamera(credentials);waitFor { backend.events!=null }
+            val network=requireNotNull(context.getSystemService(ConnectivityManager::class.java).activeNetwork)
+            backend.events!!.available(network)
+            waitFor { controller.state.value.connected && !controller.state.value.busy }
+            backend.events!!.lost(network)
+            waitFor { !controller.state.value.connected && http.isClosed && controller.state.value.error?.contains("Wi-Fi") == true }
+            assertEquals(1,backend.releases.get())
+            assertTrue(controller.state.value.error?.contains("Wi-Fi") == true)
+        }
+    }
     @Test fun rejectAndCancelDoNotLeaveCallbacksOrClaimRemoteSuccess() {
         val first=Backend();controller.pairingBackend=first
         assertTrue(controller.pairCamera(credentials));waitFor { first.events!=null };first.events!!.unavailable()
@@ -108,8 +137,12 @@ class PairingIntegrationTest {
         compose.setContent { MaterialTheme { CompanionApp(model,{}, {}) } }
         compose.onNodeWithTag("pairing-scan").assertExists()
         compose.onNodeWithTag("pairing-nfc").assertExists()
-        CameraMode.entries.forEach { compose.onNodeWithText(it.title).performScrollTo().assertExists() }
-        compose.onNodeWithTag("pairing-nfc").performScrollTo().performClick()
+        CameraMode.entries.forEach { mode ->
+            compose.onNode(hasScrollAction()).performScrollToNode(hasText(mode.title))
+            compose.onNodeWithText(mode.title).assertExists()
+        }
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("pairing-nfc"))
+        compose.onNodeWithTag("pairing-nfc").performClick()
         compose.onNodeWithText("知道了").assertExists().performClick()
         compose.onNodeWithTag("pairing-scan").assertExists()
     }

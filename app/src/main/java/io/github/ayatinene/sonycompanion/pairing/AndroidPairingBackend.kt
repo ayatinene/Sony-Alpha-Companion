@@ -17,6 +17,11 @@ class AndroidPairingBackend(private val context: Context) : PairingBackend<Netwo
     @SuppressLint("MissingPermission") // Pairing entry requests the platform-specific runtime permissions.
     override fun request(credentials: PairingCredentials, events: PairingBackend.Events<Network>): Closeable {
         check(context.getSystemService(WifiManager::class.java).isWifiEnabled) { "请先在系统设置中开启 Wi-Fi" }
+        if (android.os.Build.VERSION.SDK_INT <= 32) {
+            check(context.getSystemService(android.location.LocationManager::class.java).isLocationEnabled) {
+                "Android 10–12 请求相机 Wi-Fi 需要开启系统定位，请在系统设置中开启后重试"
+            }
+        }
         val manager = context.getSystemService(ConnectivityManager::class.java)
         try {
         val specifier = WifiNetworkSpecifier.Builder().setSsid(credentials.ssid)

@@ -60,7 +60,7 @@ class PairingConnection<N>(private val backend: PairingBackend<N>, private val o
             return withTimeout(timeoutMillis) { ready.await() }.also {
                 if (isClosed) throw IOException("相机 Wi-Fi 已断开")
             }
-        } catch (_: TimeoutCancellationException) { close(); throw IOException("等待 Wi-Fi 连接超时，请确认相机热点已开启后重试") }
+        } catch (_: TimeoutCancellationException) { close(); currentCoroutineContext().ensureActive(); throw IOException("等待 Wi-Fi 连接超时，请确认相机热点已开启后重试") }
         catch (e: Exception) { close(); throw e }
     }
     override fun close() {
