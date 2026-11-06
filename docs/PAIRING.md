@@ -7,7 +7,7 @@ QR scanning uses the embedded ZXing decoder (4.3.0, Apache-2.0), no Play Service
 image storage or external scanner application. Camera permission belongs to the scanning Activity.
 The scanner releases its camera on pause; Back cancels scanning.
 
-Both inputs produce transient `PairingCredentials`, then request a WPA2 local-only Wi-Fi network
+Both inputs produce transient `PairingCredentials`, with a QR/NFC source marker, then request a WPA2 local-only Wi-Fi network
 through Android `WifiNetworkSpecifier`. `CompanionController.connect()` owns the request via
 `PairingConnection` until failure, cancellation, network loss, session end, or replacement.
 Only `onAvailable`'s Network is used for SSDP and CameraHttp. No process-wide network binding is
@@ -16,9 +16,12 @@ on single-STA phones Android may replace the existing Wi-Fi. Internet/Wi-Fi conc
 
 Wi-Fi approval/connection and REMOTE readiness are separate states. Discovery retries up to three
 four-second SSDP rounds with 750 ms gaps and a 20-second overall paired-discovery limit. Credentials never override the manual descriptor URL
-setting for other modes; paired discovery deliberately ignores that setting. After finding exactly
-one REMOTE service, the existing RemoteCamera initialization, SessionIdentity, queues and UI navigation
-are reused. API failure never reports pairing/session success.
+setting for other modes; paired discovery deliberately ignores that setting. QR continues to select REMOTE. NFC inspects current SSDP-advertised services: ScalarWebAPI selects
+REMOTE and ContentDirectory selects JPEG. Ambiguous/missing services produce a clear error rather than
+choosing from SSID/password or probing an inactive fallback descriptor. Once selected, the existing
+RemoteCamera or SmartphoneTransfer initialization, SessionIdentity, queues and UI navigation are reused.
+JPEG opens the existing camera gallery and retains the existing user-initiated download behavior;
+this feature does not automatically save selected photos or alter capture/download implementations. API failure never reports pairing/session success.
 
 The 60-second Wi-Fi timeout, rejection and authentication/unreachable failures release the request.
 Android's public callback does not reliably distinguish user refusal from wrong password or missing
@@ -91,14 +94,41 @@ available and validated, but Companion does not infer one from QR M. No addition
 pairing handshake was established in this QR/NFC-to-Wi-Fi path. Existing REMOTE API initialization
 still runs afterwards.
 
-The official APK's support for this format is verified statically. **The actual ILCE-7RM2 NFC record,
-RF/tag technology and wake/launch behavior have not been captured or tested on hardware.** Companion
-supports the documented private NDEF payload when delivered by Android, including foreground dispatch
-and a narrow MIME launch filter. It does not use Android Beam, emulate a handover, write a tag, or claim
-that any NFC detection equals successful pairing. WSC, handover-only, identifier-only, unsupported-version,
-incomplete or unreadable tags require QR/manual connection. An AAR may route a cold tap to Sony's app
-on some phones; open Companion first. The NFC button explains hardware availability, disabled NFC and
-the fallback; it does not claim a request has succeeded.
+### ILCE-7RM2 hardware confirmation and app dispatch (2026-11-06)
+
+The user confirmed the first real-camera connection (19:03) used QR and the second (19:07) used NFC.
+Both reached REMOTE, received live-view frames, and ended normally. The real phone was vivo V2502A,
+SDK 37. This confirms the existing NFC parser/Wi-Fi/REMOTE path on that setup; unrelated photo capture
+and download were not part of this pairing acceptance.
+
+NFC Tools PRO screenshots from both the remote and sharing camera states establish NFC-F (JIS 6319-4),
+Sony FeliCa RC-S926, NFC Forum Type 3, NDEF, 113/128 bytes and non-writable status. Both show a Sony MIME
+record plus an External application record naming `com.sony.playmemories.mobile`. Visible credentials
+and routing records match; the screenshots do not expose every byte, so binary equality or a mode
+flag must not be inferred. No extra raw tag dump is needed to re-prove the working REMOTE path.
+
+The application record is Android's AAR routing mechanism. A foreground Activity's
+`enableForegroundDispatch` overrides AAR routing; Companion already registers for the Sony MIME while
+resumed. There is no need to write the tag, add raw NFC-F commands, or register a package-name alias.
+With Companion closed/backgrounded, the official package in the AAR remains the preferred target;
+a normal MIME Intent filter or higher filter priority cannot reliably override that choice. Open
+Companion before touching the camera. The non-writable camera tag is not modified, and Companion does
+not masquerade as Sony's package. Foreground dispatch, Sony record parsing and session mode selection
+are independent of that AAR target.
+
+The camera's shooting/playback state determines its one-touch function. Sony documents starting the
+registered camera application from shooting and sharing selected images from playback. Companion does
+not invent an application-start handshake. On the phone, NFC connects the provided Wi-Fi and identifies
+the currently advertised REMOTE or JPEG service. Source, Wi-Fi availability and selected mode are logged
+without passwords or complete tag payloads. The new NFC-to-JPEG routing still requires a one-touch
+sharing check on hardware; the already confirmed QR/NFC REMOTE acceptance is retained.
+
+References:
+- https://developer.android.com/develop/connectivity/nfc/nfc (Android application records)
+- https://developer.android.com/develop/connectivity/nfc/advanced-nfc (foreground dispatch)
+- https://helpguide.sony.net/ilc/1520/v1/en/contents/TP0001087155.html
+- https://helpguide.sony.net/ilc/1520/v1/en/contents/TP0001087158.html
+- https://helpguide.sony.net/ilc/1520/v1/en/contents/TP0001087160.html
 
 ## Android versions and permissions
 
@@ -125,7 +155,7 @@ Automated coverage includes parser validation, escapes and redacted diagnostics;
 fixtures, malformed/incomplete/unsupported tags; fake backend approval/rejection/cancel/timeout/loss,
 synchronous and late callbacks; bounded SSDP retries; emulator tests for Wi-Fi-before-REMOTE ordering,
 existing REMOTE initialization, network lease release, initialization failure, permission mapping,
-NDEF adapter errors and presence of manual/QR/NFC UI entries. These tests simulate callbacks and local
+NDEF adapter errors/AAR coexistence, active-service mode selection, NFC-to-JPEG/REMOTE integration and presence of manual/QR/NFC UI entries. These tests simulate callbacks and local
 HTTP endpoints. They do not exercise a real system Wi-Fi approval dialog, physical NFC or Sony hotspot.
 Check the commit's Android Debug and Android UI Actions results for actual automated outcomes.
 
@@ -144,9 +174,12 @@ Check the commit's Android Debug and Android UI Actions results for actual autom
 ### NFC on the real camera
 
 1. Enable NFC on both devices. Open Companion and camera Smart Remote Control first.
-2. Touch the phone's NFC antenna to the camera N mark for about two seconds. Android should deliver
+2. For remote, leave the camera in shooting mode with the one-touch remote application assigned.
+   For sharing, display/select the image in playback/Send to Smartphone. Touch the phone's NFC antenna
+   to the camera N mark for about two seconds. Android should deliver
    the Sony NDEF record; grant any requested Wi-Fi permission and accept the system confirmation.
-3. Require the same discovery → REMOTE → live view/photo result as QR, then test repeat touches,
+3. Confirm discovery → REMOTE/live view in shooting, or discovery → JPEG camera gallery in sharing.
+   Then test repeat touches,
    disconnect/reconnect, leaving/returning to the Activity, and NFC disabled.
 4. If no record arrives, note phone model/Android version and whether Sony's app starts instead.
    If a record is rejected, the minimum extra evidence is the NDEF record TNF/type and raw payload

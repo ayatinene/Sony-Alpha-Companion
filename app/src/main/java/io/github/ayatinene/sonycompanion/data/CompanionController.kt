@@ -125,6 +125,7 @@ class CompanionController(private val context: Context) {
     private var pairingConnection: PairingConnection<Network>? = null
     /** Memory-only, owned by the live Wi-Fi request; lets the existing reconnect button re-request it. */
     private var pairedCredentials: PairingCredentials? = null
+    private var pairedSource = PairingSource.QR
     internal var pairingBackend: PairingBackend<Network> = AndroidPairingBackend(context)
     private var lastUsbDescription = ""
     private var visible = true
@@ -338,14 +339,16 @@ class CompanionController(private val context: Context) {
             log("USB GUID 登记完成，接收端设置已保存",tag="USB")
         } finally { update { copy(busy=false) } }
     }
-    fun connect(mode: CameraMode): Boolean = connect(mode, if(mode==CameraMode.REMOTE && pairingConnection!=null) pairedCredentials else null)
-    fun pairCamera(credentials: PairingCredentials): Boolean = connect(CameraMode.REMOTE, credentials)
+    fun connect(mode: CameraMode): Boolean = connect(mode, if(mode!=CameraMode.COMPUTER && pairingConnection!=null) pairedCredentials else null, pairedSource)
+    fun pairCamera(credentials: PairingCredentials, source: PairingSource = PairingSource.QR): Boolean = connect(CameraMode.REMOTE, credentials, source)
     fun cancelPairing() { scope.launch { disconnect(false) } }
-    private fun connect(mode: CameraMode, credentials: PairingCredentials?): Boolean {
+    private fun connect(requestedMode: CameraMode, credentials: PairingCredentials?, source: PairingSource): Boolean {
         if(state.value.busy) return false
         if(state.value.transferring) { update { copy(error="请先完成或取消文件传输") }; return false }
         if(connectionJob?.isActive==true) return false
         connectionJob = scope.launch {
+            var mode = requestedMode
+            val nfcAuto = credentials!=null && source==PairingSource.NFC
             var gen = identity.currentGeneration
             try {
                 disconnect()
@@ -355,13 +358,14 @@ class CompanionController(private val context: Context) {
                 var remoteAttempt: RemoteCamera? = null
                 var smartphoneAttempt: SmartphoneTransfer? = null
                 update { copy(connecting=true,mode=mode,busy=true,message="查找相机…",error=null,files=emptyList(),folder="",galleryPath=emptyList(),remote=RemoteState(),scan=ScanState()) }
-                log("开始连接 mode=$mode",tag="CONNECT")
+                log("开始连接 mode=$mode source=${if(credentials==null) "MANUAL" else source.name}",tag="CONNECT")
                 try {
                     // Test seam: a local transport + device list lets lifecycle tests drive a real
                     // controller against a local server without a camera or Wi-Fi.
                     val testOverride=sessionOverride
                     val networks = CameraNetwork(context)
                     val network = if(credentials!=null) {
+                        log("请求相机 Wi-Fi source=${source.name}",tag="PAIRING")
                         update { copy(message="等待 Android 确认连接相机 Wi-Fi…") }
                         val pairGen=gen
                         lateinit var lease: PairingConnection<Network>
@@ -370,12 +374,13 @@ class CompanionController(private val context: Context) {
                             disconnect(false)
                             if(identity.currentGeneration==pairGen+1) update { copy(error="相机 Wi-Fi 已断开，请重新配对",message="连接已断开") }
                         } }
-                        pairingConnection=lease; pairedCredentials=credentials
+                        pairingConnection=lease; pairedCredentials=credentials; pairedSource=source
                         attempt.register { lease.close() }
                         lease.await(credentials).also {
                             currentCoroutineContext().ensureActive()
                             check(identity.currentGeneration==gen && !lease.isClosed) { "配对已取消" }
-                            update { copy(message="Wi-Fi 已连接，正在查找相机 REMOTE 服务…") }
+                            log("相机 Wi-Fi 已可用 source=${source.name} network=$it",tag="PAIRING")
+                            update { copy(message=if(nfcAuto) "Wi-Fi 已连接，正在识别相机遥控或传图服务…" else "Wi-Fi 已连接，正在查找相机 REMOTE 服务…") }
                         }
                     } else if(testOverride==null) networks.wifi() else null
                     selectedNetwork=network
@@ -435,16 +440,23 @@ class CompanionController(private val context: Context) {
                         val devices = testOverride?.devices
                             ?: if(credentials!=null) {
                                 withTimeoutOrNull(20_000) {
-                                    discoverPairedCamera { networks.discover(network!!,transport,true,"") }
-                                } ?: throw IOException("Wi-Fi 已连接，但查找 REMOTE 服务超时，请确认相机已打开智能遥控")
+                                    discoverPairedCamera { networks.discover(network!!,transport,mode==CameraMode.REMOTE,"",pairingAuto=nfcAuto) }
+                                } ?: throw IOException(if(nfcAuto) "Wi-Fi 已连接，但识别相机服务超时，请检查相机模式" else "Wi-Fi 已连接，但查找 REMOTE 服务超时，请确认相机已打开智能遥控")
                             } else networks.discover(network!!,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
                         if(identity.currentGeneration!=gen) { attempt.abortAll(); return@launch }
-                        require(devices.size==1) {
+                        val selected = if(nfcAuto) selectNfcService(devices) else null
+                        val candidates = selected?.let { listOf(it.device) } ?: devices
+                        if(selected!=null) {
+                            mode=selected.mode
+                            whenGeneration(gen) { update { copy(mode=mode,message="已识别相机服务：${mode.title}") } }
+                            log("NFC 服务识别 mode=${mode.name}",tag="PAIRING")
+                        }
+                        require(candidates.size==1) {
                             if(devices.isEmpty() && credentials!=null) "Wi-Fi 已连接，但没有发现 REMOTE 服务，请确认相机已打开智能遥控。"
                             else if(devices.isEmpty()) "没有发现相机。请确认相机工作模式、Wi-Fi 和附近设备权限，或在设置填写描述文件 URL。"
                             else "发现多个相机，请在设置填写目标相机的描述文件 URL"
                         }
-                        val device=devices.single(); log("发现 ${device.model} ${device.description} remote=${device.remote} content=${device.content} push=${device.push}",tag="CONNECT")
+                        val device=candidates.single(); log("发现 ${device.model} ${device.description} remote=${device.remote} content=${device.content} push=${device.push}",tag="CONNECT")
                         val scope=if(mode==CameraMode.REMOTE) avContentQueueScope(device) else queueScope(device,mode)
                         attachQueue(device,mode,gen,scope)
                         if(identity.currentGeneration!=gen) { attempt.abortAll(); return@launch }

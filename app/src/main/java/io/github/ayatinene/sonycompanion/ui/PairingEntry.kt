@@ -49,7 +49,11 @@ internal fun rememberPairingActions(model: CompanionViewModel, onConnecting: () 
         } else if (!eligible()) {
             latestMessage("请先结束当前连接，再扫描相机二维码")
         } else {
-            try { model.pairingInput = SonyQrParser.parse(result.contents) }
+            try {
+                val credentials=SonyQrParser.parse(result.contents)
+                model.pairingSource=PairingSource.QR
+                model.pairingInput=credentials
+            }
             catch (e: IllegalArgumentException) { latestMessage(e.message ?: "相机二维码无效") }
         }
     }
@@ -64,7 +68,7 @@ internal fun rememberPairingActions(model: CompanionViewModel, onConnecting: () 
             permissions.launch(required) // API 31+ requires coarse and fine in the same request.
         } else {
             model.pairingInput = null
-            if (model.controller.pairCamera(credentials)) latestConnecting()
+            if (model.controller.pairCamera(credentials,model.pairingSource)) latestConnecting()
         }
     }
     LaunchedEffect(model.pairingNotice) {
@@ -76,7 +80,7 @@ internal fun rememberPairingActions(model: CompanionViewModel, onConnecting: () 
             Text(when {
                 adapter == null -> "此手机不支持 NFC，请使用二维码或手动连接。"
                 !adapter.isEnabled -> "NFC 已关闭，请在系统设置中开启，再返回应用。"
-                else -> "打开相机智能遥控，将手机靠近相机 N 标识并保持约两秒。支持 Sony 配对记录；读取后仍需按 Android 提示确认 Wi-Fi 连接。若无法读取，请使用二维码。"
+                else -> "保持本应用在前台，将手机靠近相机 N 标识约两秒。相机处于拍摄模式时进入遥控；处于播放或发送到智能手机模式时进入 JPEG 传图。连接后自动识别服务，并按 Android 提示确认 Wi-Fi。标签指向索尼官方 App，本应用未打开时可能启动官方 App。"
             })
         }, confirmButton = { TextButton(onClick = { nfcHelp = false }) { Text("知道了") } },
             dismissButton = { if (adapter != null && !adapter.isEnabled) TextButton(onClick = { context.startActivity(Intent(Settings.ACTION_NFC_SETTINGS)) }) { Text("打开 NFC 设置") } })

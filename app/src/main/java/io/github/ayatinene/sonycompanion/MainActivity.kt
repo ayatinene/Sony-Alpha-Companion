@@ -6,6 +6,7 @@ import android.os.*
 import android.provider.Settings
 import android.nfc.NfcAdapter
 import io.github.ayatinene.sonycompanion.pairing.NfcPairing
+import io.github.ayatinene.sonycompanion.pairing.PairingSource
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.*
@@ -36,7 +37,11 @@ class MainActivity: ComponentActivity() {
         if(model.controller.state.value.let { it.connected || it.connecting || it.busy || it.transferring } || model.pairingInput!=null) {
             model.pairingNotice="请先结束当前连接，再触碰相机 NFC 标识"
         } else {
-            try { model.pairingInput=NfcPairing.read(source) }
+            try {
+                val credentials=NfcPairing.read(source)
+                model.pairingSource=PairingSource.NFC
+                model.pairingInput=credentials
+            }
             catch (e: IllegalArgumentException) { model.pairingNotice=e.message ?: "NFC 配对数据无效" }
             catch (_: Exception) { model.pairingNotice="无法读取此 NFC 配对数据，请重新触碰或扫描相机二维码" }
         }

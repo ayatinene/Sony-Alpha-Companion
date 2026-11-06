@@ -155,6 +155,42 @@ class PairingIntegrationTest {
             assertFalse(controller.state.value.connected);assertEquals(1,backend.releases.get());assertTrue(http.isClosed)
         }
     }
+    @Test fun nfcSharingEntersExistingJpegSessionWithoutRemoteInitializationOrAutomaticDownloads() {
+        MockWebServer().use { server ->
+            val http=CameraHttp()
+            server.enqueue(MockResponse().setBody("<Envelope><Body><BrowseResponse><Result></Result><NumberReturned>0</NumberReturned><TotalMatches>0</TotalMatches></BrowseResponse></Body></Envelope>"))
+            val device=Device("ILCE-7RM2","ILCE-7RM2",server.url("/dd.xml").toUri(),content=server.url("/cds").toUri())
+            controller.sessionOverride=CompanionController.SessionOverride(http,listOf(device))
+            val backend=Backend();controller.pairingBackend=backend
+            assertTrue(controller.pairCamera(credentials,PairingSource.NFC));waitFor { backend.events!=null }
+            backend.events!!.available(requireNotNull(context.getSystemService(ConnectivityManager::class.java).activeNetwork))
+            waitFor { controller.state.value.connected && !controller.state.value.busy }
+            assertEquals(CameraMode.JPEG,controller.state.value.mode)
+            assertEquals(1,server.requestCount)
+            assertTrue(server.takeRequest().getHeader("SOAPACTION").orEmpty().contains("Browse"))
+            runBlocking { controller.disconnect(false) }
+            assertEquals(1,backend.releases.get());assertTrue(http.isClosed)
+        }
+    }
+    @Test fun nfcRemoteUsesExistingRemoteInitialization() {
+        MockWebServer().use { server ->
+            initialize(server);override(server)
+            val backend=Backend();controller.pairingBackend=backend
+            assertTrue(controller.pairCamera(credentials,PairingSource.NFC));waitFor { backend.events!=null }
+            backend.events!!.available(requireNotNull(context.getSystemService(ConnectivityManager::class.java).activeNetwork))
+            waitFor { controller.state.value.connected && !controller.state.value.busy }
+            assertEquals(CameraMode.REMOTE,controller.state.value.mode)
+        }
+    }
+    @Test fun aarDoesNotChangeTheParsedSonyCredentials() {
+        fun field(tag:Int,bytes:ByteArray)=byteArrayOf((tag shr 8).toByte(),tag.toByte(),(bytes.size/10).toByte(),(bytes.size%10).toByte())+bytes
+        val payload=field(1,byteArrayOf(0x10))+field(0x1000,"DIRECT-ab12:ILCE-7RM2".toByteArray())+field(0x1001,"testPass".toByteArray())
+        val sony=NdefRecord.createMime(SonyNfcParser.MIME,payload)
+        val aar=NdefRecord.createApplicationRecord("com.sony.playmemories.mobile")
+        val parsed=NfcPairing.readRecords(listOf(sony,aar))
+        assertEquals("DIRECT-ab12:ILCE-7RM2",parsed.ssid)
+        assertEquals("testPass",parsed.password)
+    }
     @Test fun homeKeepsManualModesAndAddsPairingEntries() {
         val model=CompanionViewModel(context.applicationContext as android.app.Application)
         compose.setContent { MaterialTheme { CompanionApp(model,{}, {}) } }
