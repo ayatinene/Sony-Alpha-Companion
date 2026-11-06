@@ -232,7 +232,7 @@ class CompanionController(private val context: Context) {
         val token=identity.nextScanRun()
         scanJob?.cancel()
         scanJob=scope.launch(Dispatchers.IO) {
-            val lease=background.acquire("scan")
+            val lease=background.acquire("scan",token.generation)
             try {
                 // The service must actually reach startForeground before any PTP listing begins.
                 if(!awaitBackgroundReady()) {
@@ -309,7 +309,7 @@ class CompanionController(private val context: Context) {
         whenGeneration(d.gen) { update { copy(connected=false,connecting=false,busy=false,transferring=false,scan=cancelled,queue=queue,
             remote=RemoteState(),intervalRemaining=0,
             message=if(snapshot.mode==CameraMode.COMPUTER) "已取消，原文件会话已断开，请重新连接" else "已取消后台任务") } }
-        whenGeneration(d.gen) { background.reset("cancel") }
+        background.resetOwned(d.gen-1,"cancel")
         scope.launch(Dispatchers.IO) {
             withContext(NonCancellable) {
                 runCatching { sessionActions.join(d.actions) }
@@ -498,7 +498,7 @@ class CompanionController(private val context: Context) {
                             if(whenGeneration(gen) { smartphone=transfer; true } != true) { attempt.abortAll(); return@launch }
                             val autoShare=nfcAuto && device.push!=null
                             val files=if(autoShare) {
-                                shareLease=background.acquire("nfc-share")
+                                shareLease=background.acquire("nfc-share",gen)
                                 whenGeneration(gen) { update { copy(oneTouchImport=true,message="正在读取相机共享照片 · 最大可用 JPEG…") } }
                                 check(awaitBackgroundReady()) { "后台服务不可用，无法开始一触分享导入" }
                                 withTimeoutOrNull(60_000) { transfer.initialize(oneTouch=true) }
@@ -880,7 +880,7 @@ class CompanionController(private val context: Context) {
         val d=detachSession(snapshot,self,gracefulRequested=finish,expectedGeneration=expectedGeneration) ?: return false
         try {
         runCatching { d.attempt.abortAll() }
-        whenGeneration(d.gen) { background.reset("disconnect") }
+        background.resetOwned(d.gen-1,"disconnect")
         if(snapshot.device!=null) { lastDevice=snapshot.device; lastRemote=snapshot.remote; lastMode=snapshot.mode }
         if(d.ownConnection!=null) {
             runCatching { d.http?.close() }
@@ -1703,7 +1703,7 @@ class CompanionController(private val context: Context) {
         val sessionComputer=computer
         val token=identity.nextQueueRun()
         queueJob=scope.launch(Dispatchers.IO) {
-            val lease=background.acquire("transfer")
+            val lease=background.acquire("transfer",sessionGeneration)
             var started=false
             var sessionDied=false
             try {

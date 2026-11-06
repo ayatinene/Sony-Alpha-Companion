@@ -50,6 +50,23 @@ class BackgroundOwnershipTest {
         assertFalse(ownership.active)
     }
 
+    @Test fun detachedOwnerCleanupCannotReleaseNewSessionWork() {
+        val transitions=mutableListOf<Boolean>()
+        val ownership=BackgroundOwnership { active, _ -> transitions+=active }
+        val oldScan=ownership.acquire("scan",1)
+        val oldTransfer=ownership.acquire("transfer",1)
+        val fresh=ownership.acquire("nfc-share",2)
+        ownership.resetOwned(1,"old-disconnect")
+        assertTrue(ownership.active)
+        oldScan.release();oldTransfer.release()
+        ownership.resetOwned(1,"late-old-cleanup")
+        assertTrue("a late old detach must leave the new foreground lease alive",ownership.active)
+        assertEquals(listOf(true),transitions)
+        fresh.release()
+        assertFalse(ownership.active)
+        assertEquals(listOf(true,false),transitions)
+    }
+
     @Test fun nestedAcquisitionsOnlyReportTheOuterTransition() {
         val transitions = mutableListOf<Pair<Boolean, String>>()
         val ownership = BackgroundOwnership { active, reason -> transitions += active to reason }
@@ -60,3 +77,4 @@ class BackgroundOwnershipTest {
         assertEquals(listOf(true to "scan-started", false to "scan-finished"), transitions)
     }
 }
+

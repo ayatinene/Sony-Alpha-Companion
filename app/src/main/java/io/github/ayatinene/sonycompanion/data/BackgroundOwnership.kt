@@ -18,7 +18,7 @@ class BackgroundOwnership(private val onTransition: (active: Boolean, reason: St
 
     val active: Boolean get() = activeFlag
 
-    class Lease internal constructor(private val parent: BackgroundOwnership, private val kind: String) {
+    class Lease internal constructor(private val parent: BackgroundOwnership, private val kind: String, internal val owner: Long?) {
         private var released = false
         @Synchronized fun release() {
             if (released) return
@@ -27,8 +27,8 @@ class BackgroundOwnership(private val onTransition: (active: Boolean, reason: St
         }
     }
 
-    @Synchronized fun acquire(kind: String): Lease {
-        val lease = Lease(this, kind)
+    @Synchronized fun acquire(kind: String, owner: Long? = null): Lease {
+        val lease = Lease(this, kind, owner)
         leases += lease
         refresh("$kind-started")
         return lease
@@ -44,8 +44,16 @@ class BackgroundOwnership(private val onTransition: (active: Boolean, reason: St
         refresh(reason)
     }
 
+    /** Remove only the detached session's leases. Called outside SessionIdentity's lock: transition
+     * reporting can itself read session identity, so acquiring both locks would invert the order. */
+    @Synchronized fun resetOwned(owner: Long, reason: String) {
+        leases.removeAll { it.owner==owner }
+        refresh(reason)
+    }
+
     @Synchronized private fun refresh(reason: String) {
         val next = leases.isNotEmpty()
         if (next != activeFlag) { activeFlag = next; onTransition(next, reason) }
     }
 }
+
