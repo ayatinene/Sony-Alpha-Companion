@@ -1546,13 +1546,14 @@ class CompanionController(private val context: Context) {
                                         log={ message -> log(message,LogLevel.WARN,"GEOTAG") }) { out ->
                                         if(file.handle!=null) requireNotNull(sessionComputer).download(file,out,::progress)
                                         else requireNotNull(sessionHttp).stream(requireNotNull(resource).url) { response ->
-                                            if(isHttpOriginal && (response.code!=200 || response.header("Content-Range")!=null))
-                                                throw IOException("相机未返回完整原文件（HTTP ${response.code}）")
+                                            // Validate the same HTTP-original response policy exercised
+                                            // by the MockWebServer regression tests below.
+                                            val headerLength=if(isHttpOriginal) requireFullOriginalResponse(response)
+                                                else requireNotNull(response.body).contentLength()
                                             val body=requireNotNull(response.body)
                                             // Prefer the HTTP Content-Length; when the listing size is unknown
                                             // it is the only validation available. Both absent means a chunked
                                             // body, validated as "must be non-empty" by StreamCopy.
-                                            val headerLength=body.contentLength()
                                             val total=headerLength.takeIf { it>0 } ?: expected.takeIf { it>0 } ?: 0L
                                             if(expected>0 && headerLength>0 && headerLength!=expected)
                                                 log("下载 ${file.name}：列表长度 $expected 与 HTTP 长度 $headerLength 不一致，以 HTTP 为准",LogLevel.WARN,"TRANSFER")
