@@ -57,6 +57,34 @@ class InterfaceTest {
         capture("remote-landscape",compose.onNodeWithTag("remote-screen"))
     }
 
+    @Test fun landscapeHeaderStaysAtTheSafeTopHidesAndReturnsWithoutMovingCaptureControls() {
+        compose.mainClock.autoAdvance=false
+        val insets=WorkspaceInsets(top=20.dp,left=8.dp,right=8.dp)
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(740.dp,340.dp)) { RemoteWorkspace(remote,landscapeImage(),false,insets,actions(),remember { SnackbarHostState() }) }
+        } }
+        compose.mainClock.advanceTimeByFrame()
+        val screen=bounds("remote-screen"); val header=bounds("remote-header")
+        val shutter=bounds("remote-controls")
+        val safeTop=with(compose.density) { 24.dp.toPx() }
+        assertEquals("header is pinned to the safe top",screen.top+safeTop,header.top,2f)
+        assertTrue("header must not expand to screen height",header.height<=with(compose.density) { 56.dp.toPx() })
+        compose.mainClock.advanceTimeBy(4_500)
+        compose.onNodeWithTag("remote-header").assertDoesNotExist()
+        assertEquals(shutter,bounds("remote-controls"))
+        compose.onNodeWithTag("remote-viewfinder").performTouchInput { click(center) }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("remote-header").assertExists()
+        assertEquals(header.top,bounds("remote-header").top,1f)
+        compose.mainClock.advanceTimeBy(3_000)
+        compose.onNodeWithTag("remote-header").assertExists()
+        compose.onNodeWithTag("remote-viewfinder").performTouchInput { click(center) }
+        compose.mainClock.advanceTimeBy(2_000)
+        compose.onNodeWithTag("remote-header").assertExists()
+        compose.mainClock.advanceTimeBy(2_500)
+        compose.onNodeWithTag("remote-header").assertDoesNotExist()
+    }
+
     @Test fun portraitUsesTheFullWidthAndStacksThePanelBelowTheImage() {
         compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
             Box(Modifier.size(360.dp,640.dp)) { RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
@@ -275,3 +303,4 @@ class InterfaceTest {
         resolver.update(uri,ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING,0) },null,null)
     }
 }
+

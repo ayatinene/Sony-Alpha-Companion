@@ -23,7 +23,7 @@
     <application android:name=".CompanionApplication" android:label="Alpha Companion"
         android:theme="@style/AppTheme" android:icon="@drawable/ic_camera"
         android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="true" android:supportsRtl="true" tools:targetApi="31">
-        <activity android:name=".pairing.CameraQrActivity" android:exported="false" android:screenOrientation="fullSensor" android:theme="@style/zxing_CaptureTheme" />
+        <activity android:name=".pairing.CameraQrActivity" android:exported="false" android:screenOrientation="portrait" android:theme="@style/zxing_CaptureTheme" />
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

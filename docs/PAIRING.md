@@ -5,7 +5,7 @@
 Home retains all three manual connection cards and adds **扫描相机二维码** and **NFC 配对**.
 QR scanning uses the embedded ZXing decoder (4.3.0, Apache-2.0), no Play Services download,
 image storage or external scanner application. Camera permission belongs to the scanning Activity.
-The scanner releases its camera on pause; Back cancels scanning.
+The scanner releases its camera on pause; Back cancels scanning. Scanning is portrait-locked so rotating a phone does not stretch the QR frame into the library's landscape rectangle.
 
 Both inputs produce transient `PairingCredentials`, with a QR/NFC source marker, then request a WPA2 local-only Wi-Fi network
 through Android `WifiNetworkSpecifier`. `CompanionController.connect()` owns the request via
@@ -120,8 +120,13 @@ The camera's shooting/playback state determines its one-touch function. Sony doc
 registered camera application from shooting and sharing selected images from playback. Companion does
 not invent an application-start handshake. On the phone, NFC connects the provided Wi-Fi and identifies
 the currently advertised REMOTE or JPEG service. Source, Wi-Fi availability and selected mode are logged
-without passwords or complete tag payloads. The new NFC-to-JPEG routing still requires a one-touch
-sharing check on hardware; the already confirmed QR/NFC REMOTE acceptance is retained.
+without passwords or complete tag payloads. The Xiaomi 23127PN0CC / SDK 35 log exported at 19:48 confirms both NFC-to-REMOTE and NFC-to-JPEG,
+one PushRoot item, its successful 2,490,368-byte JPEG download and normal X_TransferEnd / network
+release. The original vivo REMOTE acceptance is retained. This does not diagnose the separate
+main-phone NFC reading failure. See [the complete official one-touch sharing trace](IMAGING_EDGE_ONE_TOUCH_SHARING.md)
+for its import confirmation, single-current-item versus PushRoot paths, size policy, progress,
+completion/cancellation/error codes and disconnection. Companion still uses manual downloads;
+researching that official behavior does not itself implement automatic sharing.
 
 References:
 - https://developer.android.com/develop/connectivity/nfc/nfc (Android application records)
@@ -193,3 +198,4 @@ Check the commit's Android Debug and Android UI Actions results for actual autom
 - https://developer.android.com/privacy-and-security/local-network-permission
 - https://developer.android.com/develop/connectivity/nfc/advanced-nfc
 - https://github.com/journeyapps/zxing-android-embedded (Apache-2.0)
+

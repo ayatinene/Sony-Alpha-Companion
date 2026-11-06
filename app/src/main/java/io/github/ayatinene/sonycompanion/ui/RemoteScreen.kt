@@ -20,6 +20,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalAccessibilityManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
@@ -31,13 +34,17 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.ayatinene.sonycompanion.data.*
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val workspaceShape=RoundedCornerShape(10.dp)
 private val scrim=Color.Black.copy(alpha=0.45f)
 private val headerReserve=56.dp
+internal const val REMOTE_HEADER_TIMEOUT_MILLIS=4_000L
 
 /** Safe-area insets the controls must avoid; the image may extend underneath them. */
 data class WorkspaceInsets(val top:Dp=0.dp,val bottom:Dp=0.dp,val left:Dp=0.dp,val right:Dp=0.dp)
@@ -114,20 +121,61 @@ internal const val REMOTE_GALLERY_UNSUPPORTED="当前机内应用不支持相机
     }
 }
 
+/** A bounded top slot prevents the header from inheriting the full overlay height. The parameter
+ * and shutter columns are laid out below that slot instead of relying on an estimated offset. */
 @Composable private fun BoxWithConstraintsScope.LandscapeWorkspace(state:AppState,image:Bitmap?,grid:Boolean,insets:WorkspaceInsets,actions:RemoteActions) {
-    ViewFinder(state,image,grid,Modifier.fillMaxSize())
-    WorkspaceHeader(state,grid,actions,Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top=insets.top+4.dp,start=insets.left+8.dp,end=insets.right+8.dp).testTag("remote-header"))
-    val top=insets.top+headerReserve
-    val available=(maxHeight-top-insets.bottom-8.dp).coerceAtLeast(0.dp)
-    val sideWidth=minOf(150.dp,maxWidth*0.28f)
-    Column(Modifier.align(Alignment.TopStart).offset(x=insets.left+8.dp,y=top).widthIn(max=sideWidth).heightIn(max=available).testTag("remote-params")
-        .clip(workspaceShape).background(scrim).verticalScroll(rememberScrollState()).padding(6.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
-        if(state.remote.settings.isEmpty()) Text("曝光参数请在机身调节",style=MaterialTheme.typography.bodySmall,color=Color.White.copy(alpha=.7f))
-        state.remote.settings.forEach { setting-> ParameterReadout(setting) { value->actions.onSetSetting(setting.key,value) } }
+    var headerVisible by remember { mutableStateOf(true) }
+    var interaction by remember { mutableLongStateOf(0L) }
+    var touching by remember { mutableStateOf(false) }
+    val lifecycle by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
+    val accessibility=LocalAccessibilityManager.current
+    val timeout=accessibility?.calculateRecommendedTimeoutMillis(REMOTE_HEADER_TIMEOUT_MILLIS,
+        containsIcons=true,containsText=true,containsControls=true) ?: REMOTE_HEADER_TIMEOUT_MILLIS
+    LaunchedEffect(lifecycle) {
+        if(lifecycle==Lifecycle.State.RESUMED) { headerVisible=true;interaction++ }
     }
-    Column(Modifier.align(Alignment.TopEnd).offset(x=-(insets.right+8.dp),y=top).widthIn(max=sideWidth).heightIn(max=available).testTag("remote-controls")
-        .clip(workspaceShape).background(scrim).verticalScroll(rememberScrollState()).padding(6.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(12.dp)) {
-        FocusControl(state,actions); ShutterControl(state,actions); MovieControl(state,actions)
+    LaunchedEffect(interaction,touching,lifecycle,timeout) {
+        if(!touching && lifecycle==Lifecycle.State.RESUMED) {
+            delay(timeout)
+            headerVisible=false
+        }
+    }
+    // Observe in the initial pass without consuming input: AF/shutter, scrolling and menus keep
+    // their own gestures. Holding a finger down never hides a control beneath that finger.
+    Box(Modifier.fillMaxSize().pointerInput(Unit) {
+        awaitPointerEventScope {
+            while(true) {
+                val event=awaitPointerEvent(PointerEventPass.Initial)
+                touching=event.changes.any { it.pressed }
+                headerVisible=true
+                interaction++
+            }
+        }
+    }) {
+        ViewFinder(state,image,grid,Modifier.fillMaxSize().clickable(
+            onClickLabel="显示顶部工具栏",onClick={headerVisible=true;interaction++}))
+        Column(Modifier.align(Alignment.TopStart).fillMaxSize()
+            .padding(top=insets.top+4.dp,bottom=insets.bottom+4.dp,start=insets.left+8.dp,end=insets.right+8.dp)) {
+            // Keep this slot when hidden so the side controls and viewfinder do not jump.
+            Box(Modifier.fillMaxWidth().height(headerReserve)) {
+                if(headerVisible) WorkspaceHeader(state,grid,actions,
+                    Modifier.align(Alignment.TopCenter).fillMaxWidth().testTag("remote-header"))
+            }
+            val sideWidth=minOf(150.dp,this@LandscapeWorkspace.maxWidth*0.28f)
+            Row(Modifier.fillMaxWidth().weight(1f),horizontalArrangement=Arrangement.SpaceBetween) {
+                Column(Modifier.widthIn(max=sideWidth).heightIn(max=(this@LandscapeWorkspace.maxHeight-insets.top-insets.bottom-headerReserve-8.dp).coerceAtLeast(0.dp))
+                    .testTag("remote-params").clip(workspaceShape).background(scrim)
+                    .verticalScroll(rememberScrollState()).padding(6.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
+                    if(state.remote.settings.isEmpty()) Text("曝光参数请在机身调节",style=MaterialTheme.typography.bodySmall,color=Color.White.copy(alpha=.7f))
+                    state.remote.settings.forEach { setting-> ParameterReadout(setting) { value->actions.onSetSetting(setting.key,value) } }
+                }
+                Column(Modifier.widthIn(max=sideWidth).heightIn(max=(this@LandscapeWorkspace.maxHeight-insets.top-insets.bottom-headerReserve-8.dp).coerceAtLeast(0.dp))
+                    .testTag("remote-controls").clip(workspaceShape).background(scrim)
+                    .verticalScroll(rememberScrollState()).padding(6.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                    FocusControl(state,actions); ShutterControl(state,actions); MovieControl(state,actions)
+                }
+            }
+        }
     }
 }
 
@@ -297,3 +345,4 @@ private tailrec fun Context.findActivity():Activity?=when(this) {
     is ContextWrapper->baseContext.findActivity()
     else->null
 }
+

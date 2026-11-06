@@ -92,7 +92,7 @@ internal fun rememberPairingActions(model: CompanionViewModel, onConnecting: () 
     return PairingActions(scan = {
         if (eligible()) scanner.launch(ScanOptions().setCaptureActivity(CameraQrActivity::class.java)
             .setDesiredBarcodeFormats(ScanOptions.QR_CODE).setBeepEnabled(false).setBarcodeImageEnabled(false)
-            .setOrientationLocked(false).setPrompt("扫描相机智能遥控界面的二维码"))
+            .setOrientationLocked(true).setPrompt("扫描相机智能遥控界面的二维码"))
         else latestMessage("请先结束当前连接，再扫描相机二维码")
     }, nfc = { nfcHelp = true })
 }
