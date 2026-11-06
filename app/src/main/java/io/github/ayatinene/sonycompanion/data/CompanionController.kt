@@ -123,6 +123,8 @@ class CompanionController(private val context: Context) {
     private val protocolResponses = Collections.synchronizedMap(linkedMapOf<String,String>())
     private var selectedNetwork: Network? = null
     private var pairingConnection: PairingConnection<Network>? = null
+    /** Memory-only, owned by the live Wi-Fi request; lets the existing reconnect button re-request it. */
+    private var pairedCredentials: PairingCredentials? = null
     internal var pairingBackend: PairingBackend<Network> = AndroidPairingBackend(context)
     private var lastUsbDescription = ""
     private var visible = true
@@ -336,7 +338,7 @@ class CompanionController(private val context: Context) {
             log("USB GUID 登记完成，接收端设置已保存",tag="USB")
         } finally { update { copy(busy=false) } }
     }
-    fun connect(mode: CameraMode): Boolean = connect(mode, null)
+    fun connect(mode: CameraMode): Boolean = connect(mode, if(mode==CameraMode.REMOTE && pairingConnection!=null) pairedCredentials else null)
     fun pairCamera(credentials: PairingCredentials): Boolean = connect(CameraMode.REMOTE, credentials)
     fun cancelPairing() { scope.launch { disconnect(false) } }
     private fun connect(mode: CameraMode, credentials: PairingCredentials?): Boolean {
@@ -368,7 +370,7 @@ class CompanionController(private val context: Context) {
                             disconnect(false)
                             if(identity.currentGeneration==pairGen+1) update { copy(error="相机 Wi-Fi 已断开，请重新配对",message="连接已断开") }
                         } }
-                        pairingConnection=lease
+                        pairingConnection=lease; pairedCredentials=credentials
                         attempt.register { lease.close() }
                         lease.await(credentials).also {
                             currentCoroutineContext().ensureActive()
@@ -517,7 +519,7 @@ class CompanionController(private val context: Context) {
                     // Never let a superseded connect overwrite a newer session's state.
                     whenGeneration(gen) {
                         computer=null; http=null; smartphone=null; remote=null
-                        pairingConnection?.close(); pairingConnection=null; selectedNetwork=null
+                        pairingConnection?.close(); pairingConnection=null; pairedCredentials=null; selectedNetwork=null
                         update { copy(connected=false,error=e.message,message="连接失败",scan=ScanState()) }
                     }
                 }
@@ -705,7 +707,7 @@ class CompanionController(private val context: Context) {
             val monitoringStopJob=monitoringStop
             val ownConnection=connectionJob?.takeIf { it.isActive && it!==self }
             val attempt=pendingConnection; pendingConnection=PendingResources()
-            val pairing=pairingConnection; pairingConnection=null
+            val pairing=pairingConnection; pairingConnection=null; pairedCredentials=null
             val graceful=gracefulRequested && actions.isEmpty()
             if(!graceful) oldRemote?.disallowCleanup()
             userScanPaused=false

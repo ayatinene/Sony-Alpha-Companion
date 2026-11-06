@@ -83,6 +83,29 @@ class PairingIntegrationTest {
             assertFalse(controller.state.value.connected)
         }
     }
+    @Test fun existingReconnectButtonReacquiresThePairedNetworkAndIgnoresItsOldCallback() {
+        MockWebServer().use { server ->
+            initialize(server);override(server)
+            val backend=Backend();controller.pairingBackend=backend
+            controller.pairCamera(credentials);waitFor { backend.events!=null }
+            val network=requireNotNull(context.getSystemService(ConnectivityManager::class.java).activeNetwork)
+            val oldEvents=backend.events!!;oldEvents.available(network)
+            waitFor { controller.state.value.connected && !controller.state.value.busy }
+            server.enqueue(MockResponse().setBody("""{"result":[0]}""")) // old stopRecMode
+            initialize(server)
+            override(server) // the next session receives a fresh local HTTP transport
+            assertTrue(controller.connect(CameraMode.REMOTE))
+            waitFor { backend.events!==oldEvents }
+            assertEquals(1,backend.releases.get())
+            oldEvents.lost(network);oldEvents.unavailable()
+            assertFalse(controller.state.value.connected)
+            backend.events!!.available(network)
+            waitFor { controller.state.value.connected && !controller.state.value.busy }
+            assertEquals(1,backend.releases.get())
+            runBlocking { controller.disconnect(false) }
+            assertEquals(2,backend.releases.get())
+        }
+    }
     @Test fun activityStopAndRecreationPreservePendingWifiUntilExplicitCancel() {
         val backend=Backend();controller.pairingBackend=backend
         androidx.test.core.app.ActivityScenario.launch(MainActivity::class.java).use { scenario ->

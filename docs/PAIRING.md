@@ -23,8 +23,9 @@ are reused. API failure never reports pairing/session success.
 The 60-second Wi-Fi timeout, rejection and authentication/unreachable failures release the request.
 Android's public callback does not reliably distinguish user refusal from wrong password or missing
 hotspot; the error lists these possibilities rather than inventing a diagnosis. Home **取消连接** also
-aborts an outstanding request or discovery. End the current session before scanning/touching another
-camera. Late callbacks from a released request cannot connect or terminate a newer session.
+aborts an outstanding request or discovery. The existing reconnect button re-requests the live paired network using memory-only credentials.
+Ending/failing the session clears those credentials; a later paired connection requires QR/NFC again.
+End the current session before scanning/touching another camera. Late callbacks from a released request cannot connect or terminate a newer session.
 
 An approval Activity can pause/stop MainActivity. The request belongs to the application controller,
 not a Composable or Activity; it survives that transition and configuration recreation. Pending
