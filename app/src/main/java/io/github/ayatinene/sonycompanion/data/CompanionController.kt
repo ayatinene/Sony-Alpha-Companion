@@ -15,6 +15,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 import io.github.ayatinene.sonycompanion.BuildConfig
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.json.*
@@ -95,7 +96,16 @@ class CompanionController(private val context: Context) {
         backgroundActive.value = active
         if(active) requestBackgroundStart()
     }
+    /** JPEG/PTP previews and thumbnails keep their proven single-request path. */
     private val thumbnailGate = Semaphore(1)
+    /** Only REMOTE avContent thumbnails use two concurrent HTTP reads. */
+    private val remoteThumbnailScheduler = RemoteThumbnailScheduler(parallelism = 2)
+    private val activeRemoteThumbnails = AtomicInteger()
+    /** Across Date navigation, retain successfully decoded REMOTE thumbnails within a 16 MiB budget.
+     * A new camera session starts clean; no directory-wide prefetch is performed. */
+    private val remoteThumbs = object : LruCache<String, Bitmap>(16 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount.coerceAtLeast(1)
+    }
     private var monitoringStop: Job? = null
     private var lastDevice: Device? = null
     private var lastRemote = RemoteState()
@@ -732,7 +742,7 @@ class CompanionController(private val context: Context) {
         d.scan?.join()
         d.queue?.join()
         d.http?.close()
-        whenGeneration(d.gen) { thumbs.evictAll(); importedUrls.clear() }
+        whenGeneration(d.gen) { thumbs.evictAll(); remoteThumbs.evictAll(); importedUrls.clear() }
         whenGeneration(d.gen) { update { copy(connected=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") } }
         log("断开完成",LogLevel.DEBUG,"CONNECT")
     }
@@ -1393,36 +1403,69 @@ class CompanionController(private val context: Context) {
         val current=state.value
         return current.sessionGeneration==gen && current.queueScope==scope && current.connected && computer===ptp && http===transport
     }
-    suspend fun thumbnail(file:CameraFile, expectedScope: String?, expectedGeneration: Long = state.value.sessionGeneration): Bitmap? {
-        val snapshot=state.value;val transport=http;val ptp=computer
-        return withContext(Dispatchers.IO) { thumbnailGate.withPermit {
-        if(!snapshot.connected || !state.value.connected || snapshot.queueScope!=expectedScope || state.value.queueScope!=expectedScope
-            || snapshot.sessionGeneration!=expectedGeneration || state.value.sessionGeneration!=expectedGeneration) return@withContext null
-        val key=if(file.original && file.protocol==PROTOCOL_HTTP && file.thumbnail!=null)
-            "${expectedGeneration}:${snapshot.queueScope}:thumbnail:${file.thumbnail}"
-        else "${expectedGeneration}:${snapshot.queueScope}:${file.id}:${file.thumbnail}"
-        thumbs.get(key)?.let { return@withContext it }
-        try {
-            val bytes = if(file.handle!=null) ptp?.thumbnail(file.handle) else {
-                val url=file.thumbnail ?: file.bestResource()?.url ?: return@withContext null
-                transport?.stream(url) { r ->
-                    val source=requireNotNull(r.body).source()
-                    require(!source.request(4L*1024*1024+1)) { "缩略图过大" }; source.readByteArray()
+    suspend fun thumbnail(file:CameraFile, expectedScope: String?, expectedGeneration: Long = state.value.sessionGeneration): Bitmap? =
+        withContext(Dispatchers.IO) {
+            val snapshot=state.value
+            val transport=http
+            val ptp=computer
+            if(!sessionCurrent(expectedGeneration,expectedScope,ptp,transport) ||
+                !snapshot.connected || snapshot.queueScope!=expectedScope ||
+                snapshot.sessionGeneration!=expectedGeneration) return@withContext null
+
+            val isRemoteThumb=snapshot.mode==CameraMode.REMOTE && file.original &&
+                file.protocol==PROTOCOL_HTTP && file.thumbnail!=null
+            // The REMOTE key intentionally uses the camera-supplied URL, not the JPEG/ARW
+            // file ID or current Date folder. Two formats and a later revisit share it.
+            val key=if(isRemoteThumb)
+                "${expectedGeneration}:${expectedScope}:thumbnail:${file.thumbnail}"
+            else "${expectedGeneration}:${expectedScope}:${file.id}:${file.thumbnail}"
+            val cache=if(isRemoteThumb) remoteThumbs else thumbs
+            val queuedAt=System.nanoTime()
+
+            suspend fun fetch(): Bitmap? {
+                // A queued request may resume after a disconnect or after an earlier owner
+                // was cancelled. It must not touch the stale session's HTTP transport.
+                if(!sessionCurrent(expectedGeneration,expectedScope,ptp,transport)) return null
+                val started=System.nanoTime()
+                val concurrent=if(isRemoteThumb) activeRemoteThumbnails.incrementAndGet() else 0
+                if(isRemoteThumb) log("REMOTE 缩略图开始 ${file.name} queue=${(started-queuedAt)/1_000_000}ms active=$concurrent",
+                    LogLevel.DEBUG,"THUMB")
+                try {
+                    val bytes=if(file.handle!=null) ptp?.thumbnail(file.handle) else {
+                        val url=file.thumbnail ?: file.bestResource()?.url ?: return null
+                        transport?.stream(url) { response ->
+                            val input=requireNotNull(response.body).source()
+                            require(!input.request(4L*1024*1024+1)) { "缩略图过大" }
+                            input.readByteArray()
+                        }
+                    } ?: return null
+                    val options=BitmapFactory.Options().apply { inJustDecodeBounds=true }
+                    BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
+                    options.inSampleSize=(maxOf(options.outWidth,options.outHeight)/500).coerceAtLeast(1)
+                    options.inJustDecodeBounds=false
+                    val decoded=BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
+                    // Do not cache an old/cancelled session's result, even if its HTTP call
+                    // returned just as the user switched away.
+                    if(decoded!=null && currentCoroutineContext().isActive &&
+                        sessionCurrent(expectedGeneration,expectedScope,ptp,transport)) {
+                        cache.put(key,decoded)
+                        if(isRemoteThumb) log("REMOTE 缩略图完成 ${file.name} bytes=${bytes.size} fetch=${(System.nanoTime()-started)/1_000_000}ms active=$concurrent",
+                            LogLevel.DEBUG,"THUMB")
+                        return decoded
+                    }
+                    return null
+                } catch(e: CancellationException) { throw e }
+                catch(e: Exception) {
+                    if(isRemoteThumb) log("REMOTE 缩略图失败 ${file.name}: ${e.message}",LogLevel.DEBUG,"THUMB")
+                    return null
+                } finally {
+                    if(isRemoteThumb) activeRemoteThumbnails.decrementAndGet()
                 }
-            } ?: return@withContext null
-            val options=BitmapFactory.Options().apply { inJustDecodeBounds=true }
-            BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
-            options.inSampleSize=(maxOf(options.outWidth,options.outHeight)/500).coerceAtLeast(1); options.inJustDecodeBounds=false
-            // Never backfill a newer session's cache from an old-generation request, and never return
-            // a bitmap whose session changed while it decoded.
-            val decoded=BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
-            if(decoded!=null && sessionCurrent(expectedGeneration,snapshot.queueScope,ptp,transport)) {
-                thumbs.put(key,decoded)
-                return@withContext decoded
             }
-            return@withContext null
-        } catch(e: CancellationException) { throw e } catch(_: Exception) { null }
-    } } }
+
+            if(isRemoteThumb) remoteThumbnailScheduler.load(key,{ remoteThumbs.get(key) }) { fetch() }
+            else thumbnailGate.withPermit { thumbs.get(key) ?: fetch() }
+        }
     fun enqueue(incoming:List<CameraFile>, expectedGeneration: Long = state.value.sessionGeneration,
         geo: Map<String,GeoSnapshot> = emptyMap()) {
         val snapshot=state.value
