@@ -27,6 +27,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -152,8 +154,9 @@ internal const val REMOTE_GALLERY_UNSUPPORTED="当前机内应用不支持相机
             }
         }
     }) {
-        ViewFinder(state,image,grid,Modifier.fillMaxSize().clickable(
-            onClickLabel="显示顶部工具栏",onClick={headerVisible=true;interaction++}))
+        ViewFinder(state,image,grid,Modifier.fillMaxSize().semantics {
+            onClick("显示顶部工具栏") { headerVisible=true;interaction++;true }
+        })
         Column(Modifier.align(Alignment.TopStart).fillMaxSize()
             .padding(top=insets.top+4.dp,bottom=insets.bottom+4.dp,start=insets.left+8.dp,end=insets.right+8.dp)) {
             // Keep this slot when hidden so the side controls and viewfinder do not jump.
