@@ -118,6 +118,9 @@ data class AppState(val mode: CameraMode? = null, val connected: Boolean = false
     val files: List<CameraFile> = emptyList(), val folder: String = "",
     /** Ordered parent URIs for JPEG folders and the REMOTE date level. */
     val galleryPath: List<String> = emptyList(), val queue: List<QueueItem> = emptyList(),
+    /** True only while this NFC sharing batch owns preparation, downloads and completion. */
+    val oneTouchImport: Boolean = false,
     val transferring: Boolean = false, val local: List<LocalPhoto> = emptyList(), val logs: List<String> = emptyList(),
     val intervalRemaining: Int = 0, val queueScope: String? = null, val queueNotice: String = "",
     val scan: ScanState = ScanState(), val sessionGeneration: Long = 0)
+

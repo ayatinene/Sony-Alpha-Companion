@@ -20,8 +20,31 @@ setting for other modes; paired discovery deliberately ignores that setting. QR 
 REMOTE and ContentDirectory selects JPEG. Ambiguous/missing services produce a clear error rather than
 choosing from SSID/password or probing an inactive fallback descriptor. Once selected, the existing
 RemoteCamera or SmartphoneTransfer initialization, SessionIdentity, queues and UI navigation are reused.
-JPEG opens the existing camera gallery and retains the existing user-initiated download behavior;
-this feature does not automatically save selected photos or alter capture/download implementations. API failure never reports pairing/session success.
+NFC + an advertised XPushList share service automatically imports only the camera's shared JPEG set.
+It first uses the DID current-content item when available, otherwise enumerates PushRoot and selected
+subfolders; it never falls back to PhotoRoot. The default is the largest available JPEG, using the
+existing resource selector, queue, safe file GET retries, PhotoStore/MediaStore saving and dedup.
+No extra import confirmation is shown: touching the camera with Companion open starts the requested
+automatic import after Android Wi-Fi approval. This deliberately differs from Imaging Edge's import-size
+confirmation and default 2 MP policy. RAW/MPO entries import their offered JPEG derivative, never an ARW
+mislabelled as JPEG. Unsupported types, thumbnail-only items, empty/conflicting/cyclic/oversized selections
+are reported before enqueueing. Up to 2,000 photos / 256 directories / 16 levels are supported; enumeration
+is bounded by time as well as count. JPEG without XPushList remains manual, with an explanatory status.
+Manual JPEG connections and QR-to-REMOTE are unchanged. API failure never reports pairing/session success.
+
+The automatic batch holds a foreground-service lease through preparation and download, offers **取消导入**,
+and uses the existing queue UI. Historical recovered tasks stay pending for explicit retry; they are never
+automatically included in a new share. The camera receives advisory X_GetPushRoot and item-count
+X_TransferProgress notifications. Their timeout/failure is nonfatal, as in the inspected official app.
+A started session receives one best-effort X_TransferEnd: 0 for success/partial failure, 2 for user
+cancellation, 1 for total/preparation failure. Counts and error messages distinguish partial success.
+The owned request is then released; no automatic transition into REMOTE occurs. A lost network or forced
+OS/service cancellation aborts locally and cannot guarantee delivery of an end notification.
+
+A separate generation-owned coordinator selects and observes the batch; every actual file import still
+runs in the existing transfer queue. Detach captures/cancels/joins that coordinator with its own resources.
+A late completion cannot close or publish into a newer session. The capture and thumbnail implementations
+are untouched; the automatic workspace shows progress instead of starting gallery thumbnail requests.
 
 The 60-second Wi-Fi timeout, rejection and authentication/unreachable failures release the request.
 Android's public callback does not reliably distinguish user refusal from wrong password or missing
@@ -125,8 +148,9 @@ one PushRoot item, its successful 2,490,368-byte JPEG download and normal X_Tran
 release. The original vivo REMOTE acceptance is retained. This does not diagnose the separate
 main-phone NFC reading failure. See [the complete official one-touch sharing trace](IMAGING_EDGE_ONE_TOUCH_SHARING.md)
 for its import confirmation, single-current-item versus PushRoot paths, size policy, progress,
-completion/cancellation/error codes and disconnection. Companion still uses manual downloads;
-researching that official behavior does not itself implement automatic sharing.
+completion/cancellation/error codes and disconnection. Automatic importing was added afterwards in
+0.1.16-preview; those earlier hardware logs validate the original connection/manual download path,
+not the newly added automatic-import coordinator.
 
 References:
 - https://developer.android.com/develop/connectivity/nfc/nfc (Android application records)
@@ -160,7 +184,11 @@ Automated coverage includes parser validation, escapes and redacted diagnostics;
 fixtures, malformed/incomplete/unsupported tags; fake backend approval/rejection/cancel/timeout/loss,
 synchronous and late callbacks; bounded SSDP retries; emulator tests for Wi-Fi-before-REMOTE ordering,
 existing REMOTE initialization, network lease release, initialization failure, permission mapping,
-NDEF adapter errors/AAR coexistence, active-service mode selection, NFC-to-JPEG/REMOTE integration and presence of manual/QR/NFC UI entries. These tests simulate callbacks and local
+NDEF adapter errors/AAR coexistence, active-service mode selection, NFC-to-JPEG/REMOTE integration,
+DID profile/resource/filename mapping, RAW/MPO JPEG filtering, selected multi-file/subfolder traversal,
+empty/unsupported/missing PushRoot rejection, end codes/advisory notifications, actual automatic
+MediaStore import/dedup, keeping historical tasks pending, partial/total failure, cancellation from UI
+and a background notification, network loss and superseded coordinators, and presence of manual/QR/NFC UI entries. These tests simulate callbacks and local
 HTTP endpoints. They do not exercise a real system Wi-Fi approval dialog, physical NFC or Sony hotspot.
 Check the commit's Android Debug and Android UI Actions results for actual automated outcomes.
 
@@ -183,9 +211,12 @@ Check the commit's Android Debug and Android UI Actions results for actual autom
    For sharing, display/select the image in playback/Send to Smartphone. Touch the phone's NFC antenna
    to the camera N mark for about two seconds. Android should deliver
    the Sony NDEF record; grant any requested Wi-Fi permission and accept the system confirmation.
-3. Confirm discovery → REMOTE/live view in shooting, or discovery → JPEG camera gallery in sharing.
-   Then test repeat touches,
-   disconnect/reconnect, leaving/returning to the Activity, and NFC disabled.
+3. In sharing, verify the automatic-import status, a saved JPEG in DCIM/AlphaCompanion and the final
+   import count followed by disconnection, without pressing a Download button. Repeat the same item
+   to verify valid existing-photo dedup. For a multi-image selection made on the camera, check that
+   the whole selected set is imported. Cancel a longer batch; completed photos should remain and
+   the pending file must not appear as a completed photo. These new automatic behaviors await real
+   camera testing; the old REMOTE connection result remains established.
 4. If no record arrives, note phone model/Android version and whether Sony's app starts instead.
    If a record is rejected, the minimum extra evidence is the NDEF record TNF/type and raw payload
    captured with an NFC tag reader (contains Wi-Fi password: share privately). This establishes the

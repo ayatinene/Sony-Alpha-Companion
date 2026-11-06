@@ -80,7 +80,7 @@ internal fun rememberPairingActions(model: CompanionViewModel, onConnecting: () 
             Text(when {
                 adapter == null -> "此手机不支持 NFC，请使用二维码或手动连接。"
                 !adapter.isEnabled -> "NFC 已关闭，请在系统设置中开启，再返回应用。"
-                else -> "保持本应用在前台，将手机靠近相机 N 标识约两秒。相机处于拍摄模式时进入遥控；处于播放或发送到智能手机模式时进入 JPEG 传图。连接后自动识别服务，并按 Android 提示确认 Wi-Fi。标签指向索尼官方 App，本应用未打开时可能启动官方 App。"
+                else -> "保持本应用在前台，将手机靠近相机 N 标识约两秒。相机处于拍摄模式时进入遥控；处于播放或发送到智能手机模式时自动导入共享 JPEG（最大可用尺寸），完成后断开连接。连接后自动识别服务，并按 Android 提示确认 Wi-Fi。标签指向索尼官方 App，本应用未打开时可能启动官方 App。"
             })
         }, confirmButton = { TextButton(onClick = { nfcHelp = false }) { Text("知道了") } },
             dismissButton = { if (adapter != null && !adapter.isEnabled) TextButton(onClick = { context.startActivity(Intent(Settings.ACTION_NFC_SETTINGS)) }) { Text("打开 NFC 设置") } })

@@ -469,7 +469,7 @@ private fun gallerySecondaryText(file: CameraFile): String = if (file.container)
         }
         if (expanded) {
             Column(Modifier.heightIn(max=180.dp).verticalScroll(rememberScrollState())) { state.queue.takeLast(50).forEach { item -> Text("${item.file.name} · ${item.state}${item.error?.let { "\n$it" } ?: ""}", style=MaterialTheme.typography.bodySmall, modifier=Modifier.padding(vertical=4.dp)) } }
-            if (!state.transferring) TextButton(onClick=actions.clearCompleted) { Text("清空队列记录") }
+            if (!state.transferring) TextButton(onClick=actions.clearCompleted,enabled=!state.oneTouchImport) { Text("清空队列记录") }
         }
     } }
 }
@@ -491,3 +491,4 @@ internal fun bytes(value: Long): String = when {
     value <= 0 -> "未知大小"; value < 1024 -> "$value B"; value < 1024*1024 -> String.format(Locale.ROOT, "%.1f KB", value/1024.0)
     else -> String.format(Locale.ROOT, "%.1f MB", value/(1024.0*1024))
 }
+

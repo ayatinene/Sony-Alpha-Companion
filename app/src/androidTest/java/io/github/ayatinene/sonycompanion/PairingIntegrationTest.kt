@@ -155,7 +155,7 @@ class PairingIntegrationTest {
             assertFalse(controller.state.value.connected);assertEquals(1,backend.releases.get());assertTrue(http.isClosed)
         }
     }
-    @Test fun nfcSharingEntersExistingJpegSessionWithoutRemoteInitializationOrAutomaticDownloads() {
+    @Test fun nfcContentDirectoryWithoutPushRemainsManualAndNeverStartsRemote() {
         MockWebServer().use { server ->
             val http=CameraHttp()
             server.enqueue(MockResponse().setBody("<Envelope><Body><BrowseResponse><Result></Result><NumberReturned>0</NumberReturned><TotalMatches>0</TotalMatches></BrowseResponse></Body></Envelope>"))
@@ -190,6 +190,14 @@ class PairingIntegrationTest {
         val parsed=NfcPairing.readRecords(listOf(sony,aar))
         assertEquals("DIRECT-ab12:ILCE-7RM2",parsed.ssid)
         assertEquals("testPass",parsed.password)
+    }
+    @Test fun automaticImportStatusOffersCancelDuringPreparation() {
+        var cancelled=false
+        compose.setContent { MaterialTheme { OneTouchImportStatus(AppState(oneTouchImport=true,busy=true,
+            message="正在读取相机共享照片")) { cancelled=true } } }
+        compose.onNodeWithTag("one-touch-import").assertExists()
+        compose.onNodeWithText("取消导入").performClick()
+        assertTrue(cancelled)
     }
     @Test fun homeKeepsManualModesAndAddsPairingEntries() {
         val model=CompanionViewModel(context.applicationContext as android.app.Application)

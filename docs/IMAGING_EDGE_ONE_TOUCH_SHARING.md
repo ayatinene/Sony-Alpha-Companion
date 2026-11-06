@@ -15,7 +15,8 @@
 本报告追踪了 NFC 入口到 Wi-Fi、服务分类、单张 / 列表、尺寸选择、下载、存储、进度、成功、
 取消和错误退出的静态控制流。它不等于已在 A7R II 上运行官方 App 验证所有分支，也不代表
 已证明所有 Sony 相机行为一致。当前 Companion 已有的 JPEG 手动下载与这个完整 Push 流程
-仍有差别；本次行为研究和扫码 / 拍摄页面 UI 修复没有改动下载、拍照或 RAW / 缩略图实现。
+仍有差别。0.1.15 的行为研究及扫码 / 拍摄页面修复没有改动下载；后续 0.1.16 已接入
+自动分享导入，具体实现范围见本文最后一节。拍照、RAW 预览和缩略图实现未改。
 
 ## 1. NFC 与系统分发
 
@@ -203,10 +204,29 @@ Companion 此次从 PushRoot 浏览同一张文件，是不同但已经实机成
 SmartphoneTransfer、队列、PhotoStore 和 SessionIdentity；不能将 PhotoRoot 回退当成
 “用户要分享整张卡”，不能顺带自动恢复其他历史未完成下载，也不能固定只取第一项。
 取消 / 断线 / 新会话必须使旧任务失效；完成后发结束通知并释放本次 Wi-Fi lease。
-这些是本轮研究得到的具体适配边界，**本次 UI 修复没有把它们标记成已实现或已实机验收**。
+以上是研究得到的适配边界；0.1.15 的 UI 修复没有把它们标记成已实现或已实机验收。
 
 参考：
 - https://developer.android.com/develop/connectivity/nfc/nfc
 - https://developer.android.com/develop/connectivity/nfc/advanced-nfc
 - https://android.googlesource.com/platform/packages/apps/Nfc/+/0ebea21/src/com/android/nfc/NfcDispatcher.java
 - https://helpguide.sony.net/ilc/1520/v1/en/contents/TP0001087160.html
+
+
+## 10. 后续接入：0.1.16-preview
+
+NFC 发起且相机提供 XPushList 时，现已自动执行 DID 单张 / PushRoot 选集导入。
+`protocol.OneTouchSharing` 独立解析 DID、筛选 JPEG 并有界遍历选集；
+`SmartphoneTransfer.initialize(oneTouch=true)` 禁止 PhotoRoot 回退。
+`CompanionController` 的代次绑定协调任务交给原下载队列保存，保留未选择的历史待恢复任务，
+后台服务与现有 MediaStore 清理 / 去重逻辑复用。UI 显示导入进度并可取消，完成后断开。
+
+与官方的有意差别：不额外弹导入尺寸确认框，直接按 Companion 原有的“最大可用 JPEG”导入；
+RAW/MPO 原文件资源排除，只导入相机提供的 JPEG。视频、HEIF、仅有缩略图、冲突或无效的
+选集会明确失败，不能冒充全部导入。成功 / 部分失败 / 取消 / 全部失败分别显示不同结果，
+结束码沿用已观察到的官方映射。GetPushRoot / Progress 是有界的可失败通知，End 最多发送一次。
+连接中断或强制取消时只保证本地释放，不虚构相机已经收到结束通知。
+
+自动测试以模拟 Wi-Fi 回调、本地 HTTP 服务和真实 Android 队列 / 前台服务 / MediaStore 验证
+软件路径。实机仍需验证新增自动导入单张、相机多选集和取消；此前人工下载成功的日志
+不能当作新功能已经实机通过。

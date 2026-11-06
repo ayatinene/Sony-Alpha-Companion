@@ -59,6 +59,7 @@ class CompanionController(private val context: Context) {
     private var connectionJob: Job? = null
     private var identityJob: Job? = null
     private var queueJob: Job? = null
+    private var oneTouchJob: Job? = null
     private var intervalJob: Job? = null
     private var scanJob: Job? = null
     private var galleryJob: Job? = null
@@ -86,7 +87,7 @@ class CompanionController(private val context: Context) {
     private class DetachedSession(
         val gen: Long, val snapshot: AppState,
         val http: CameraHttp?, val computer: ComputerTransfer?, val smartphone: SmartphoneTransfer?, val remote: RemoteCamera?,
-        val queue: Job?, val identity: Job?, val scan: Job?, val gallery: Job?, val monitoring: List<Job>, val monitoringStop: Job?,
+        val queue: Job?, val identity: Job?, val scan: Job?, val gallery: Job?, val oneTouch: Job?, val monitoring: List<Job>, val monitoringStop: Job?,
         val ownConnection: Job?, val attempt: PendingResources, val pairing: PairingConnection<Network>?, val actions: List<Job>, val effectiveGraceful: Boolean)
     private val backgroundActive = MutableStateFlow(false)
     /** True while any scan or download holds a background lease. The service observes this instead of
@@ -312,6 +313,7 @@ class CompanionController(private val context: Context) {
         scope.launch(Dispatchers.IO) {
             withContext(NonCancellable) {
                 runCatching { sessionActions.join(d.actions) }
+                runCatching { d.oneTouch?.join() }
                 runCatching { d.scan?.join() }
                 runCatching { d.queue?.join() }
                 runCatching { d.identity?.join() }
@@ -350,6 +352,8 @@ class CompanionController(private val context: Context) {
             var mode = requestedMode
             val nfcAuto = credentials!=null && source==PairingSource.NFC
             var gen = identity.currentGeneration
+            var sharing: Pair<SmartphoneTransfer,List<CameraFile>>? = null
+            var shareLease: BackgroundOwnership.Lease? = null
             try {
                 disconnect()
                 gen = identity.currentGeneration
@@ -492,7 +496,14 @@ class CompanionController(private val context: Context) {
                             val transfer=SmartphoneTransfer(device,transport) { log(it,LogLevel.WARN,"BROWSE") }
                             smartphoneAttempt=transfer
                             if(whenGeneration(gen) { smartphone=transfer; true } != true) { attempt.abortAll(); return@launch }
-                            val files=transfer.initialize()
+                            val autoShare=nfcAuto && device.push!=null
+                            val files=if(autoShare) {
+                                shareLease=background.acquire("nfc-share")
+                                whenGeneration(gen) { update { copy(oneTouchImport=true,message="正在读取相机共享照片 · 最大可用 JPEG…") } }
+                                check(awaitBackgroundReady()) { "后台服务不可用，无法开始一触分享导入" }
+                                withTimeoutOrNull(60_000) { transfer.initialize(oneTouch=true) }
+                                    ?: throw IOException("读取相机共享内容超时")
+                            } else transfer.initialize()
                             val published=whenGeneration(gen) {
                                 update { copy(connected=true,files=files,folder=transfer.rootId,galleryPath=emptyList(),message="已连接 · JPEG 传输") }
                                 attempt.release()
@@ -505,6 +516,8 @@ class CompanionController(private val context: Context) {
                                 return@launch
                             }
                             log("JPEG 连接成功 root=${transfer.rootId} entries=${files.size}",tag="CONNECT")
+                            if(autoShare) sharing=transfer to files
+                            else if(nfcAuto) whenGeneration(gen) { update { copy(message="相机未提供分享服务，请在图库手动选择下载") } }
                         }
                         loadIdentity(device,transport)
                     }
@@ -523,7 +536,7 @@ class CompanionController(private val context: Context) {
                     val owns=identity.currentGeneration==gen
                     withContext(NonCancellable+Dispatchers.IO) {
                         if(owns) {
-                            runCatching { withTimeout(INIT_FINISH_TIMEOUT_MILLIS) { remoteAttempt?.finish(); smartphoneAttempt?.finish() } }
+                            runCatching { withTimeout(INIT_FINISH_TIMEOUT_MILLIS) { remoteAttempt?.finish(); smartphoneAttempt?.finish(error=nfcAuto) } }
                                 .onFailure { log("初始化失败后结束会话：${it.message}",LogLevel.WARN,"CONNECT",it) }
                         }
                         attempt.abortAll()
@@ -532,14 +545,113 @@ class CompanionController(private val context: Context) {
                     whenGeneration(gen) {
                         computer=null; http=null; smartphone=null; remote=null
                         pairingConnection?.close(); pairingConnection=null; pairedCredentials=null; selectedNetwork=null
-                        update { copy(connected=false,error=e.message,message="连接失败",scan=ScanState()) }
+                        update { copy(connected=false,oneTouchImport=false,error=e.message,message="连接失败",scan=ScanState()) }
                     }
                 }
             } finally {
                 whenGeneration(gen) { update { copy(connecting=false,busy=false) } }
+                if(sharing==null) shareLease?.release()
             }
+            sharing?.let { (camera,files) -> startOneTouchImport(gen,camera,files,requireNotNull(shareLease)) }
         }
         return true
+    }
+    /** NFC share uses the real queue and PhotoStore; this coordinator only selects this batch,
+     * reports camera-side progress, and schedules a generation-checked session end. It never calls
+     * disconnect from its own job (disconnect cancels/joins the job captured in DetachedSession). */
+    private fun startOneTouchImport(gen: Long, camera: SmartphoneTransfer, initial: List<CameraFile>, lease: BackgroundOwnership.Lease) {
+        if(whenGeneration(gen) { connectedTo(camera) }!=true) { lease.release();return }
+        lateinit var job: Job
+        job=scope.launch(start=CoroutineStart.LAZY) {
+            var download: Job? = null
+            var result=OneTouchResult.Failure
+            var summary="一触分享导入失败"
+            var failure: String? = null
+            try {
+                whenGeneration(gen) { update { copy(oneTouchImport=true,busy=true,message="正在读取相机共享照片 · 最大可用 JPEG…") } }
+                check(awaitBackgroundReady()) { "后台服务不可用，无法开始一触分享导入" }
+                val device=whenGeneration(gen) { state.value.device.takeIf { connectedTo(camera) } } ?: return@launch
+                val selected=withTimeout(60_000) { selectedSharedJpegs(initial,device.description) { camera.browse(it,4000) } }
+                currentCoroutineContext().ensureActive()
+                val ids=selected.map { it.id }.toSet()
+                if(whenGeneration(gen) { connectedTo(camera) }!=true) return@launch
+                camera.beginOneTouchCopy()
+                camera.oneTouchProgress(selected.size,0)
+                // Recovered work is retained for explicit retry, never included in the NFC batch.
+                whenGeneration(gen) { update { copy(queue=queue.map {
+                    if(it.state in setOf("等待","传输中")) it.copy(state="待恢复",received=0) else it
+                },queueNotice="仅自动导入本次相机共享集合",message="正在自动导入 ${selected.size} 张共享照片 · 最大可用 JPEG") } }
+                enqueueFiles(selected,gen,emptyMap(),true)
+                download=queueJob
+                val activeDownload=requireNotNull(download) { "未能启动共享照片下载" }
+                coroutineScope {
+                    val progress=launch {
+                        state.map { snapshot -> snapshot.queue.count { it.file.id in ids && it.state in setOf("完成","已存在","失败") } }
+                            .distinctUntilChanged().collect { count -> if(count>0) camera.oneTouchProgress(selected.size,count) }
+                    }
+                    try { activeDownload.join() } finally { progress.cancelAndJoin() }
+                }
+                currentCoroutineContext().ensureActive()
+                if(whenGeneration(gen) { connectedTo(camera) }!=true) return@launch
+                val batch=state.value.queue.filter { it.file.id in ids }
+                result=oneTouchOutcome(batch,ids)
+                camera.oneTouchProgress(selected.size,batch.count { it.state in setOf("完成","已存在","失败") })
+                val imported=batch.count { it.state=="完成" }
+                val existing=batch.count { it.state=="已存在" }
+                val failed=batch.count { it.state=="失败" }
+                summary=when(result) {
+                    OneTouchResult.Success -> "一触分享完成 · 已导入 $imported 张，已存在 $existing 张"
+                    OneTouchResult.PartialFailure -> "一触分享部分完成 · 已导入 $imported 张，已存在 $existing 张，失败 $failed 张"
+                    OneTouchResult.Failure -> "一触分享失败 · $failed 张未能导入"
+                    OneTouchResult.Cancelled -> "一触分享已取消 · 已导入 $imported 张，已存在 $existing 张"
+                }
+                if(result in setOf(OneTouchResult.Failure,OneTouchResult.PartialFailure)) failure=summary
+                log("一触分享结果 result=$result imported=$imported existing=$existing failed=$failed",tag="SHARE")
+            } catch(e: TimeoutCancellationException) {
+                result=OneTouchResult.Failure;failure="读取相机共享集合超时";summary="一触分享导入失败"
+                log(failure.orEmpty(),LogLevel.WARN,"SHARE")
+            } catch(e: CancellationException) {
+                result=OneTouchResult.Cancelled;summary="一触分享已取消，已保存的照片保留"
+                throw e
+            } catch(e: Exception) {
+                result=OneTouchResult.Failure;failure=e.message ?: "无法读取或导入相机共享照片"
+                log("一触分享失败：$failure",LogLevel.ERROR,"SHARE",e)
+            } finally {
+                // Capture the queue job, never read a newer session's global queue across suspension.
+                withContext(NonCancellable) { download?.cancelAndJoin() }
+                var ending=false
+                whenGeneration(gen) {
+                    if(connectedTo(camera) && oneTouchJob===job) {
+                        ending=true
+                        camera.setOneTouchResult(result)
+                        update { copy(message="正在结束一触分享…") }
+                        // Dispatch on the next main-loop turn, after this job's finally has returned.
+                        scope.launch(Dispatchers.Main) endShare@{
+                            try {
+                                if(whenGeneration(gen) { connectedTo(camera) && oneTouchJob===job }!=true) return@endShare
+                                oneTouchJob=null
+                                disconnect(true)
+                                whenGeneration(gen+1) { update { copy(message=summary,error=failure) } }
+                            } catch(e: CancellationException) { throw e }
+                            catch(e: Exception) {
+                                log("结束一触分享失败：${e.message}",LogLevel.ERROR,"SHARE",e)
+                                whenGeneration(gen+1) { update { copy(error="结束一触分享时发生错误，请检查诊断日志") } }
+                            } finally { lease.release() }
+                        }
+                    }
+                }
+                if(!ending) lease.release()
+            }
+        }
+        oneTouchJob=job
+        job.start()
+    }
+    private fun connectedTo(camera: SmartphoneTransfer): Boolean = state.value.connected && smartphone===camera
+    fun cancelOneTouchImport() {
+        if(!state.value.oneTouchImport) return
+        log("用户取消一触分享导入",tag="SHARE")
+        val job=oneTouchJob
+        if(job!=null) job.cancel() else cancelPairing()
     }
     /**
      * Reads and publishes the saved queue for [gen] atomically: a superseded attempt must not publish
@@ -712,6 +824,7 @@ class CompanionController(private val context: Context) {
             val gen=nextGeneration()
             val actions=sessionActions.detach()
             val oldHttp=http; val oldComputer=computer; val oldSmartphone=smartphone; val oldRemote=remote
+            val oldShare=oneTouchJob;oneTouchJob=null
             val oldQueue=queueJob; val oldIdentity=identityJob; val oldScan=scanJob; val oldGallery=galleryJob
             val monitoring=listOfNotNull(liveJob,eventJob,intervalJob)
             liveJob=null; eventJob=null; intervalJob=null
@@ -720,19 +833,22 @@ class CompanionController(private val context: Context) {
             val ownConnection=connectionJob?.takeIf { it.isActive && it!==self }
             val attempt=pendingConnection; pendingConnection=PendingResources()
             val pairing=pairingConnection; pairingConnection=null; pairedCredentials=null
-            val graceful=gracefulRequested && actions.isEmpty()
+            // A sharing session has no shutter RPC to protect. Incidental local/UI actions must not
+            // suppress its X_TransferEnd; they are cancelled and joined before the end sequence.
+            val graceful=gracefulRequested && (actions.isEmpty() || (snapshot.oneTouchImport && oldRemote==null))
             if(!graceful) oldRemote?.disallowCleanup()
             userScanPaused=false
             computer=null; remote=null; smartphone=null; http=null; selectedNetwork=null
             avContent=null; avContentSource=null; galleryPager=null; avContentEndpoint=null
             captureBinding.clear()
-            update { copy(connected=false,connecting=false,busy=false,transferring=false,folder="",galleryPath=emptyList(),scan=ScanState()) }
-            DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,oldGallery,monitoring,monitoringStopJob,ownConnection,attempt,pairing,actions,graceful)
+            update { copy(connected=false,connecting=false,busy=false,transferring=false,oneTouchImport=false,folder="",galleryPath=emptyList(),scan=ScanState()) }
+            DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,oldGallery,oldShare,monitoring,monitoringStopJob,ownConnection,attempt,pairing,actions,graceful)
         }
         if(!detached.effectiveGraceful) {
             runCatching { detached.computer?.abort() }
             runCatching { detached.http?.close() }
         }
+        detached.oneTouch?.takeIf { it!==self }?.cancel()
         detached.actions.forEach { it.cancel() }
         detached.scan?.cancel()
         detached.queue?.cancel()
@@ -764,6 +880,7 @@ class CompanionController(private val context: Context) {
         // released by cancellation, so these joins are bounded and no live-view finally can race the
         // end sequence below.
         sessionActions.join(d.actions,self)
+        d.oneTouch?.takeIf { it!==self }?.join()
         d.identity?.join()
         // A gallery switch can be blocked in an HTTP RPC; bound the join so a graceful disconnect can
         // never hang on it (the transport is closed later in the end sequence).
@@ -1522,9 +1639,10 @@ class CompanionController(private val context: Context) {
             }
         }
     fun enqueue(incoming:List<CameraFile>, expectedGeneration: Long = state.value.sessionGeneration,
-        geo: Map<String,GeoSnapshot> = emptyMap()) {
+        geo: Map<String,GeoSnapshot> = emptyMap()) = enqueueFiles(incoming,expectedGeneration,geo,false)
+    private fun enqueueFiles(incoming: List<CameraFile>, expectedGeneration: Long, geo: Map<String,GeoSnapshot>, automatic: Boolean) {
         val snapshot=state.value
-        if(!snapshot.connected || snapshot.sessionGeneration!=expectedGeneration) return
+        if(!snapshot.connected || snapshot.sessionGeneration!=expectedGeneration || (snapshot.oneTouchImport && !automatic)) return
         identity.locked {
             update {
                 // Re-check atomically against the latest state so a stale caller cannot overwrite it.
@@ -1780,7 +1898,7 @@ class CompanionController(private val context: Context) {
             enqueue(ready)
         } finally { update { copy(busy=false) } }
     }
-    fun clearCompleted() { update { copy(queue=queue.filter { it.state in listOf("等待","传输中") }) } }
+    fun clearCompleted() { if(state.value.oneTouchImport) return;update { copy(queue=queue.filter { it.state in listOf("等待","传输中") }) } }
     fun diagnostics(): String {
         val snapshot=state.value
         val previous=lastMode==snapshot.mode

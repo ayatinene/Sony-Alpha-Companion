@@ -154,16 +154,30 @@ private fun openAppSettings(context:Context) {
             }}) { padding ->
                 Column(Modifier.fillMaxSize().padding(padding)) {
                     if(state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if(state.oneTouchImport) OneTouchImportStatus(state,controller::cancelOneTouchImport)
                     when(shown) {
                         Destination.Home,Destination.Capture->Home(state,controller,
                             onOpenWorkspace={ nav=nav.copy(destination=workspaceFor(state.mode,state.remote.galleryActive),entryTarget=null) },
                             onConnect=connectWithPermissions,permissions=requestPermissions,pairing=pairing)
-                        Destination.Gallery->CameraGallery(state,controller.galleryActions())
+                        Destination.Gallery->if(state.oneTouchImport) Column(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                            Text("正在导入相机共享照片",style=MaterialTheme.typography.titleMedium)
+                            QueuePanel(state,controller.galleryActions())
+                            Text("照片保存到 DCIM/AlphaCompanion；完成后自动结束连接。",style=MaterialTheme.typography.bodyMedium)
+                        } else CameraGallery(state,controller.galleryActions())
                         Destination.Local->LocalLibraryScreen(state,controller)
                         Destination.Settings->SettingsPage(state,controller,theme,dynamic,{theme=it;controller.prefs.edit().putString("theme",it).apply()}, {dynamic=it;controller.prefs.edit().putBoolean("dynamic",it).apply()},requestPermissions,geotagging,::enableGeotagging,::disableGeotagging)
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable internal fun OneTouchImportStatus(state: AppState, onCancel: ()->Unit) {
+    Surface(color=MaterialTheme.colorScheme.surfaceContainer,modifier=Modifier.fillMaxWidth().testTag("one-touch-import")) {
+        Row(Modifier.padding(horizontal=16.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically) {
+            Text(state.message,Modifier.weight(1f),style=MaterialTheme.typography.bodyMedium)
+            TextButton(onClick=onCancel) { Text("取消导入") }
         }
     }
 }
@@ -188,7 +202,7 @@ private fun openAppSettings(context:Context) {
                 val remoteCapture=state.mode==CameraMode.REMOTE&&!state.remote.galleryActive
                 Icon(if(remoteCapture)Icons.Outlined.CameraAlt else Icons.Outlined.PhotoAlbum,null)
                 Spacer(Modifier.width(8.dp))
-                Text(if(remoteCapture) "进入拍摄" else "打开相机图库")
+                Text(if(state.oneTouchImport) "查看导入进度" else if(remoteCapture) "进入拍摄" else "打开相机图库")
             } }
             item { OutlinedButton(onClick={ state.mode?.let(onConnect) },enabled=!state.connecting&&!state.busy&&!state.transferring,shape=shape,modifier=Modifier.fillMaxWidth()) { Text("重新连接相机") } }
             item { OutlinedButton(onClick=c::endSession,enabled=!state.busy&&!state.transferring,shape=shape,modifier=Modifier.fillMaxWidth()) { Icon(Icons.Outlined.LinkOff,null);Spacer(Modifier.width(8.dp));Text("断开相机") } }
@@ -271,7 +285,7 @@ private fun openAppSettings(context:Context) {
         item { RemoteGeotaggingSetting(geotagging,onEnableRequest=onEnableGeotagging,onDisable=onDisableGeotagging) }
         item { HorizontalDivider() }
         item { Text("存储与诊断",style=MaterialTheme.typography.titleMedium) }
-        item { Text("照片保存在 DCIM/AlphaCompanion。\n预览不会自动保存，点击下载才保存到系统图库。\n相机图库中未完成的下载可在重连后继续，重试会从头下载。\n本地图库可删除文件，或仅清除导入记录。",style=MaterialTheme.typography.bodySmall) }
+        item { Text("照片保存在 DCIM/AlphaCompanion。\nNFC 一触分享会自动导入相机共享的 JPEG（最大可用尺寸），结束后断开连接。\n其他预览不会自动保存，点击下载才保存到系统图库。\n相机图库中未完成的下载可在重连后继续，重试会从头下载。\n本地图库可删除文件，或仅清除导入记录。",style=MaterialTheme.typography.bodySmall) }
         item { Box {
             OutlinedButton(onClick={logMenu=true},shape=shape){Text("记录级别：${logLevel.name}")}
             DropdownMenu(logMenu,{logMenu=false}) { LogLevel.entries.forEach { level ->
