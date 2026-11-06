@@ -32,8 +32,11 @@ internal class RemoteThumbnailScheduler(
         mutex.lock()
         try {
             cached()?.let { return it }
-            return gate.withPermit {
-                cached() ?: fetch()
+            gate.acquire()
+            try {
+                return cached() ?: fetch()
+            } finally {
+                gate.release()
             }
         } finally {
             mutex.unlock()

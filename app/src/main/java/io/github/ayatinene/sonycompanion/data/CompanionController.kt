@@ -1464,7 +1464,14 @@ class CompanionController(private val context: Context) {
             }
 
             if(isRemoteThumb) remoteThumbnailScheduler.load(key,{ remoteThumbs.get(key) }) { fetch() }
-            else thumbnailGate.withPermit { thumbs.get(key) ?: fetch() }
+            else {
+                thumbnailGate.acquire()
+                try {
+                    thumbs.get(key) ?: fetch()
+                } finally {
+                    thumbnailGate.release()
+                }
+            }
         }
     fun enqueue(incoming:List<CameraFile>, expectedGeneration: Long = state.value.sessionGeneration,
         geo: Map<String,GeoSnapshot> = emptyMap()) {
