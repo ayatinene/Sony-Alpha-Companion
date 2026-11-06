@@ -52,8 +52,9 @@ are incorporated in the app.
   independently implemented Kotlin parser; its resulting SSID matches the observed ILCE-7RM2 network.
   The actual password/raw payload stayed out of test output and repository fixtures.
 - M is recognized by QrDataUtil but is not used by that WifiQrData construction path. No evidence
-  here establishes it as the AP BSSID or an application-level authentication token. Companion validates
-  an optional 12-hex M but neither connects by that address nor treats it as camera identity.
+  here establishes it as the AP BSSID or an application-level authentication token. Companion ignores
+  optional M content and neither connects by that address nor treats it as camera identity. It imposes
+  no unverified MAC syntax on a field that the inspected official Wi-Fi QR path does not consume.
 - Companion supports W01 only, rejects duplicate/unknown fields, truncated/invalid escapes,
   empty/malformed WPA2 credentials and SSIDs over 32 UTF-8 bytes. It accepts standard WPA2 printable
   passphrases of 8–63 characters rather than imposing Sony's UI-level exact eight-character check.

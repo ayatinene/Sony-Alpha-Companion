@@ -42,7 +42,6 @@ object SonyQrParser {
         val camera = fields["C"].orEmpty()
         require(prefix.length == 4 && prefix.isNotBlank() && camera.isNotBlank()) { "相机二维码缺少 S 或 C 字段" }
         // M is not used as a BSSID or authentication token without verified semantics.
-        fields["M"]?.let { require(it.matches(Regex("[0-9a-fA-F]{12}"))) { "相机二维码设备标识格式错误" } }
         return PairingCredentials.create("DIRECT-$prefix:$camera", fields["P"].orEmpty())
     }
 }

@@ -18,6 +18,8 @@ class PairingParserTest {
     }
     @Test fun macIsOptionalAndNeverRequiredToBuildTheSsid() {
         assertEquals("DIRECT-ab12:DSC-RX100M5", SonyQrParser.parse("W01:C:DSC-RX100M5;P:12345678;S:ab12;").ssid)
+        // Official WifiQrData ignores M; do not impose an unverified MAC-address interpretation.
+        assertEquals("DIRECT-ZmE0:ILCE-7RM2",SonyQrParser.parse(qr.replace("001122334455","opaque-id")).ssid)
     }
     @Test fun escapedDelimitersAndBackslashAreDecoded() {
         val result=SonyQrParser.parse("W01:S:ab12;P:ab\\;cd\\:e\\,f\\\\;C:ILCE-7RM2;")
@@ -27,7 +29,7 @@ class PairingParserTest {
         listOf("", "W02:S:ab12;P:12345678;C:Camera;", qr.removeSuffix(";"), qr+"\\", qr+";",
             qr.replace("S:ZmE0;", ""), qr.replace("C:ILCE-7RM2;", ""), qr.replace("P:testPass;", ""),
             qr.replace("P:testPass;", "P:;"), qr+"S:xxxx;", qr+"X:foo;", qr.replace("S:","S="),
-            qr.replace("001122334455", "invalid"), qr.replace("testPass","bad\\xPass"),
+            qr.replace("testPass","bad\\xPass"),
             qr.replace("ZmE0","\u0000")).forEach(::reject)
     }
     @Test fun ssidLimitCountsUtf8BytesAndPassphrasesFollowWpa2Bounds() {
