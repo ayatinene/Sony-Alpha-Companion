@@ -300,7 +300,7 @@ class CompanionController(private val context: Context) {
         log("取消后台任务 scan=${snapshot.scan.phase} transferring=${snapshot.transferring}",LogLevel.INFO,"FGS")
         // Forced: detachSession closes the transports before cancelling monitoring, so no cleanup RPC
         // is sent, then we join only the detached jobs.
-        val d=detachSession(snapshot,null,gracefulRequested=false)
+        val d=detachSession(snapshot,null,gracefulRequested=false) ?: return
         runCatching { d.attempt.abortAll() }
         val cancelled=snapshot.scan.copy(phase=ScanPhase.Failed,error="已取消",paused=false)
         val queue=snapshot.queue.map { if(it.state in listOf("等待","传输中")) it.copy(state="已取消") else it }
@@ -309,7 +309,7 @@ class CompanionController(private val context: Context) {
         whenGeneration(d.gen) { update { copy(connected=false,connecting=false,busy=false,transferring=false,scan=cancelled,queue=queue,
             remote=RemoteState(),intervalRemaining=0,
             message=if(snapshot.mode==CameraMode.COMPUTER) "已取消，原文件会话已断开，请重新连接" else "已取消后台任务") } }
-        background.reset("cancel")
+        whenGeneration(d.gen) { background.reset("cancel") }
         scope.launch(Dispatchers.IO) {
             withContext(NonCancellable) {
                 runCatching { sessionActions.join(d.actions) }
@@ -575,15 +575,22 @@ class CompanionController(private val context: Context) {
                 currentCoroutineContext().ensureActive()
                 val ids=selected.map { it.id }.toSet()
                 if(whenGeneration(gen) { connectedTo(camera) }!=true) return@launch
+                require(state.value.queue.count { it.file.id !in ids }+selected.size<=2000) {
+                    "下载队列记录已接近上限，请先在相机图库清理队列记录后重新触碰 NFC"
+                }
                 camera.beginOneTouchCopy()
                 camera.oneTouchProgress(selected.size,0)
                 // Recovered work is retained for explicit retry, never included in the NFC batch.
                 whenGeneration(gen) { update { copy(queue=queue.map {
                     if(it.state in setOf("等待","传输中")) it.copy(state="待恢复",received=0) else it
                 },queueNotice="仅自动导入本次相机共享集合",message="正在自动导入 ${selected.size} 张共享照片 · 最大可用 JPEG") } }
-                enqueueFiles(selected,gen,emptyMap(),true)
-                download=queueJob
-                val activeDownload=requireNotNull(download) { "未能启动共享照片下载" }
+                download=whenGeneration(gen) {
+                    if(!connectedTo(camera)) null else {
+                        enqueueFiles(selected,gen,emptyMap(),true)
+                        queueJob
+                    }
+                }
+                val activeDownload=download ?: return@launch
                 coroutineScope {
                     val progress=launch {
                         state.map { snapshot -> snapshot.queue.count { it.file.id in ids && it.state in setOf("完成","已存在","失败") } }
@@ -592,8 +599,9 @@ class CompanionController(private val context: Context) {
                     try { activeDownload.join() } finally { progress.cancelAndJoin() }
                 }
                 currentCoroutineContext().ensureActive()
-                if(whenGeneration(gen) { connectedTo(camera) }!=true) return@launch
-                val batch=state.value.queue.filter { it.file.id in ids }
+                val batch=whenGeneration(gen) {
+                    state.value.queue.filter { it.file.id in ids }.takeIf { connectedTo(camera) }
+                } ?: return@launch
                 result=oneTouchOutcome(batch,ids)
                 camera.oneTouchProgress(selected.size,batch.count { it.state in setOf("完成","已存在","失败") })
                 val imported=batch.count { it.state=="完成" }
@@ -629,9 +637,9 @@ class CompanionController(private val context: Context) {
                         scope.launch(Dispatchers.Main) endShare@{
                             try {
                                 if(whenGeneration(gen) { connectedTo(camera) && oneTouchJob===job }!=true) return@endShare
-                                oneTouchJob=null
-                                disconnect(true)
-                                whenGeneration(gen+1) { update { copy(message=summary,error=failure) } }
+                                if(disconnectOwned(true,false,gen)) {
+                                    whenGeneration(gen+1) { update { copy(message=summary,error=failure) } }
+                                }
                             } catch(e: CancellationException) { throw e }
                             catch(e: Exception) {
                                 log("结束一触分享失败：${e.message}",LogLevel.ERROR,"SHARE",e)
@@ -643,8 +651,10 @@ class CompanionController(private val context: Context) {
                 if(!ending) lease.release()
             }
         }
-        oneTouchJob=job
-        job.start()
+        val published=whenGeneration(gen) {
+            if(!connectedTo(camera)) false else { oneTouchJob=job;true }
+        }==true
+        if(published) { if(!job.start()) lease.release() } else { job.cancel();lease.release() }
     }
     private fun connectedTo(camera: SmartphoneTransfer): Boolean = state.value.connected && smartphone===camera
     fun cancelOneTouchImport() {
@@ -819,8 +829,9 @@ class CompanionController(private val context: Context) {
      * the monitoring jobs, and marks the remote so a live-view finally cannot send a cleanup RPC.
      * `effectiveGraceful` is false whenever a control action is still in flight (a cancelled capture
      * does not mean the camera stopped, so no record-mode cleanup is sent). */
-    private fun detachSession(snapshot: AppState, self: Job?, gracefulRequested: Boolean): DetachedSession {
+    private fun detachSession(snapshot: AppState, self: Job?, gracefulRequested: Boolean, expectedGeneration: Long? = null): DetachedSession? {
         val detached = identity.locked {
+            if(expectedGeneration!=null && identity.currentGeneration!=expectedGeneration) return@locked null
             val gen=nextGeneration()
             val actions=sessionActions.detach()
             val oldHttp=http; val oldComputer=computer; val oldSmartphone=smartphone; val oldRemote=remote
@@ -843,7 +854,7 @@ class CompanionController(private val context: Context) {
             captureBinding.clear()
             update { copy(connected=false,connecting=false,busy=false,transferring=false,oneTouchImport=false,folder="",galleryPath=emptyList(),scan=ScanState()) }
             DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,oldGallery,oldShare,monitoring,monitoringStopJob,ownConnection,attempt,pairing,actions,graceful)
-        }
+        } ?: return null
         if(!detached.effectiveGraceful) {
             runCatching { detached.computer?.abort() }
             runCatching { detached.http?.close() }
@@ -859,13 +870,17 @@ class CompanionController(private val context: Context) {
         return detached
     }
     suspend fun disconnect(finish: Boolean = true, allowSonySleep: Boolean = false) {
+        disconnectOwned(finish,allowSonySleep,null)
+    }
+    /** A stale automatic completion must test its generation in the same lock as detachment. */
+    private suspend fun disconnectOwned(finish: Boolean, allowSonySleep: Boolean, expectedGeneration: Long?): Boolean {
         val snapshot=state.value
         log("断开开始 finish=$finish allowSonySleep=$allowSonySleep connected=${snapshot.connected}",LogLevel.DEBUG,"CONNECT")
         val self=coroutineContext[Job]
-        val d=detachSession(snapshot,self,gracefulRequested=finish)
+        val d=detachSession(snapshot,self,gracefulRequested=finish,expectedGeneration=expectedGeneration) ?: return false
         try {
         runCatching { d.attempt.abortAll() }
-        background.reset("disconnect")
+        whenGeneration(d.gen) { background.reset("disconnect") }
         if(snapshot.device!=null) { lastDevice=snapshot.device; lastRemote=snapshot.remote; lastMode=snapshot.mode }
         if(d.ownConnection!=null) {
             runCatching { d.http?.close() }
@@ -910,6 +925,7 @@ class CompanionController(private val context: Context) {
         whenGeneration(d.gen) { update { copy(connected=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") } }
         log("断开完成",LogLevel.DEBUG,"CONNECT")
         } finally { d.pairing?.close() }
+        return true
     }
     fun endSession() {
         if(state.value.transferring) return
@@ -1646,7 +1662,7 @@ class CompanionController(private val context: Context) {
         identity.locked {
             update {
                 // Re-check atomically against the latest state so a stale caller cannot overwrite it.
-                if(sessionGeneration!=expectedGeneration || queueScope!=snapshot.queueScope || !connected) this
+                if(sessionGeneration!=expectedGeneration || queueScope!=snapshot.queueScope || !connected || (oneTouchImport && !automatic)) this
                 else {
                     // For COMPUTER the current scan listing (this.files) is the source of truth: only a
                     // file that uniquely matches (id+parent+name+date+size) is enqueued, never a stale

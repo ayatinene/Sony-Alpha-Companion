@@ -79,12 +79,12 @@ class OneTouchImportIntegrationTest {
         val progress=CopyOnWriteArrayList<String>()
         val starts=AtomicInteger()
         val folderReads=CountDownLatch(1)
-        var empty=false
-        var failFirst=false
-        var failAll=false
-        var slow=false
-        var blockFolder=false
-        var multi=false
+        @Volatile var empty=false
+        @Volatile var failFirst=false
+        @Volatile var failAll=false
+        @Volatile var slow=false
+        @Volatile var blockFolder=false
+        @Volatile var multi=false
         val device: Device
         init {
             server.start()
@@ -185,6 +185,27 @@ class OneTouchImportIntegrationTest {
             assertTrue(camera.ends.single().contains("<ErrCode>0</ErrCode>"))
         }
     }
+    @Test fun capacityFailureRetainsHistoricalTasksAndDownloadsNothing() {
+        Camera(false).use { camera ->
+            val saved=(1..2000).map { QueueItem(CameraFile("old-$it","old-$it.JPG",date="2020",parent="PhotoRoot")) }
+            val store=TransferQueueStore(File(context.filesDir,"transfer-queues.json"))
+            val key=queueScope(camera.device,CameraMode.JPEG)
+            store.save(key,saved)
+            val http=camera.connect();completed(http)
+            assertTrue(camera.downloads.isEmpty());assertTrue(camera.ends.single().contains("<ErrCode>1</ErrCode>"))
+            assertEquals(2000,store.load(key).size)
+            assertTrue(store.load(key).all { it.file.id.startsWith("old-") && it.state=="待恢复" })
+        }
+    }
+    @Test fun cancellingSelectedFolderEnumerationEndsWithTwoWithoutStartingDownloads() {
+        Camera(false).use { camera ->
+            camera.multi=true;camera.blockFolder=true
+            val http=camera.connect();assertTrue(camera.folderReads.await(8,TimeUnit.SECONDS))
+            controller.cancelOneTouchImport();completed(http)
+            assertTrue(camera.downloads.isEmpty());assertTrue(camera.ends.single().contains("<ErrCode>2</ErrCode>"))
+        }
+    }
+
     @Test fun cancelDuringHttpDownloadRemovesPartialPhotoEndsWithTwoAndReleasesWifi() {
         Camera().use { camera ->
             camera.slow=true

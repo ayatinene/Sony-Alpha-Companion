@@ -33,7 +33,8 @@ is bounded by time as well as count. JPEG without XPushList remains manual, with
 Manual JPEG connections and QR-to-REMOTE are unchanged. API failure never reports pairing/session success.
 
 The automatic batch holds a foreground-service lease through preparation and download, offers **取消导入**,
-and uses the existing queue UI. Historical recovered tasks stay pending for explicit retry; they are never
+and uses the existing queue UI. The existing 2,000-record queue cap is checked before adding a batch; if history plus the selection
+would exceed it, importing stops without overwriting those records. Historical recovered tasks stay pending for explicit retry; they are never
 automatically included in a new share. The camera receives advisory X_GetPushRoot and item-count
 X_TransferProgress notifications. Their timeout/failure is nonfatal, as in the inspected official app.
 A started session receives one best-effort X_TransferEnd: 0 for success/partial failure, 2 for user
@@ -43,6 +44,7 @@ OS/service cancellation aborts locally and cannot guarantee delivery of an end n
 
 A separate generation-owned coordinator selects and observes the batch; every actual file import still
 runs in the existing transfer queue. Detach captures/cancels/joins that coordinator with its own resources.
+Queue-job capture and automatic detachment check the generation atomically under SessionIdentity.
 A late completion cannot close or publish into a newer session. The capture and thumbnail implementations
 are untouched; the automatic workspace shows progress instead of starting gallery thumbnail requests.
 
