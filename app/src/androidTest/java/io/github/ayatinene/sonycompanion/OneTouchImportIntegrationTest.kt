@@ -79,6 +79,9 @@ class OneTouchImportIntegrationTest {
         val progress=CopyOnWriteArrayList<String>()
         val starts=AtomicInteger()
         val folderReads=CountDownLatch(1)
+        val endStarted=CountDownLatch(1)
+        val allowEnd=CountDownLatch(1)
+        @Volatile var blockEnd=false
         @Volatile var empty=false
         @Volatile var failFirst=false
         @Volatile var failAll=false
@@ -97,7 +100,11 @@ class OneTouchImportIntegrationTest {
                     val body=request.body.readUtf8()
                     return when {
                         action.contains("#X_TransferStart") -> { starts.incrementAndGet();MockResponse().setBody("<Envelope/>") }
-                        action.contains("#X_TransferEnd") -> { ends+=body;MockResponse().setBody("<Envelope/>") }
+                        action.contains("#X_TransferEnd") -> {
+                            ends+=body
+                            if(blockEnd) { endStarted.countDown();allowEnd.await(5,TimeUnit.SECONDS) }
+                            MockResponse().setBody("<Envelope/>")
+                        }
                         action.contains("#X_TransferProgress") -> { progress+=body;MockResponse().setBody("<Envelope/>") }
                         action.contains("#X_GetPushRoot") -> MockResponse().setBody("<Envelope/>")
                         request.path=="/did.xml" -> MockResponse().setBody("<root><X_CurrentContent_URL>"+
@@ -185,6 +192,21 @@ class OneTouchImportIntegrationTest {
             assertTrue(camera.ends.single().contains("<ErrCode>0</ErrCode>"))
         }
     }
+    @Test fun newPairingWaitsUntilThePreviousShareHasFinishedEnding() {
+        Camera().use { camera ->
+            camera.blockEnd=true
+            val http=camera.connect()
+            try {
+                assertTrue(camera.endStarted.await(8,TimeUnit.SECONDS))
+                assertTrue(controller.state.value.busy);assertTrue(controller.state.value.oneTouchImport)
+                assertFalse(controller.state.value.connected)
+                assertFalse(controller.pairCamera(PairingCredentials.create("DIRECT-test:ILCE-7RM2","testPass"),PairingSource.NFC))
+                assertEquals(1,backend.requests.get())
+            } finally { camera.allowEnd.countDown() }
+            completed(http)
+        }
+    }
+
     @Test fun capacityFailureRetainsHistoricalTasksAndDownloadsNothing() {
         Camera(false).use { camera ->
             val saved=(1..2000).map { QueueItem(CameraFile("old-$it","old-$it.JPG",date="2020",parent="PhotoRoot")) }

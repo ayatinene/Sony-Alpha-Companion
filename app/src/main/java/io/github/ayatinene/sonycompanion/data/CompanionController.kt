@@ -643,7 +643,7 @@ class CompanionController(private val context: Context) {
                             } catch(e: CancellationException) { throw e }
                             catch(e: Exception) {
                                 log("结束一触分享失败：${e.message}",LogLevel.ERROR,"SHARE",e)
-                                whenGeneration(gen+1) { update { copy(error="结束一触分享时发生错误，请检查诊断日志") } }
+                                whenGeneration(gen+1) { update { copy(busy=false,oneTouchImport=false,error="结束一触分享时发生错误，请检查诊断日志") } }
                             } finally { lease.release() }
                         }
                     }
@@ -658,7 +658,8 @@ class CompanionController(private val context: Context) {
     }
     private fun connectedTo(camera: SmartphoneTransfer): Boolean = state.value.connected && smartphone===camera
     fun cancelOneTouchImport() {
-        if(!state.value.oneTouchImport) return
+        val snapshot=state.value
+        if(!snapshot.oneTouchImport || (!snapshot.connected && !snapshot.connecting)) return
         log("用户取消一触分享导入",tag="SHARE")
         val job=oneTouchJob
         if(job!=null) job.cancel() else cancelPairing()
@@ -852,7 +853,8 @@ class CompanionController(private val context: Context) {
             computer=null; remote=null; smartphone=null; http=null; selectedNetwork=null
             avContent=null; avContentSource=null; galleryPager=null; avContentEndpoint=null
             captureBinding.clear()
-            update { copy(connected=false,connecting=false,busy=false,transferring=false,oneTouchImport=false,folder="",galleryPath=emptyList(),scan=ScanState()) }
+            val endingShare=graceful && snapshot.oneTouchImport && oldSmartphone!=null
+            update { copy(connected=false,connecting=false,busy=endingShare,transferring=false,oneTouchImport=endingShare,folder="",galleryPath=emptyList(),scan=ScanState()) }
             DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,oldGallery,oldShare,monitoring,monitoringStopJob,ownConnection,attempt,pairing,actions,graceful)
         } ?: return null
         if(!detached.effectiveGraceful) {
@@ -922,13 +924,14 @@ class CompanionController(private val context: Context) {
         d.queue?.join()
         d.http?.close()
         whenGeneration(d.gen) { thumbs.evictAll(); remoteThumbs.evictAll(); importedUrls.clear() }
-        whenGeneration(d.gen) { update { copy(connected=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") } }
+        whenGeneration(d.gen) { update { copy(connected=false,busy=false,oneTouchImport=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") } }
         log("断开完成",LogLevel.DEBUG,"CONNECT")
         } finally { d.pairing?.close() }
         return true
     }
     fun endSession() {
-        if(state.value.transferring) return
+        val snapshot=state.value
+        if(snapshot.transferring || (snapshot.oneTouchImport && !snapshot.connected && !snapshot.connecting)) return
         // A plain (untracked) job: disconnect must never cancel/join itself.
         scope.launch {
             try { disconnect(allowSonySleep=true) } catch(e: CancellationException) { throw e }

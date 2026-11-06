@@ -39,7 +39,8 @@ automatically included in a new share. The camera receives advisory X_GetPushRoo
 X_TransferProgress notifications. Their timeout/failure is nonfatal, as in the inspected official app.
 A started session receives one best-effort X_TransferEnd: 0 for success/partial failure, 2 for user
 cancellation, 1 for total/preparation failure. Counts and error messages distinguish partial success.
-The owned request is then released; no automatic transition into REMOTE occurs. A lost network or forced
+The closing state remains busy until the end sequence finishes, so another touch cannot start a new
+share while the previous X_TransferEnd is still pending. The owned request is then released; no automatic transition into REMOTE occurs. A lost network or forced
 OS/service cancellation aborts locally and cannot guarantee delivery of an end notification.
 
 A separate generation-owned coordinator selects and observes the batch; every actual file import still

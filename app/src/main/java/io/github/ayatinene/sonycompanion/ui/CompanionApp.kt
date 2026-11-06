@@ -177,7 +177,7 @@ private fun openAppSettings(context:Context) {
     Surface(color=MaterialTheme.colorScheme.surfaceContainer,modifier=Modifier.fillMaxWidth().testTag("one-touch-import")) {
         Row(Modifier.padding(horizontal=16.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically) {
             Text(state.message,Modifier.weight(1f),style=MaterialTheme.typography.bodyMedium)
-            TextButton(onClick=onCancel) { Text("取消导入") }
+            TextButton(onClick=onCancel,enabled=state.connected||state.connecting) { Text("取消导入") }
         }
     }
 }

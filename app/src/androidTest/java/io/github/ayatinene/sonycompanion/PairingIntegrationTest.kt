@@ -193,7 +193,7 @@ class PairingIntegrationTest {
     }
     @Test fun automaticImportStatusOffersCancelDuringPreparation() {
         var cancelled=false
-        compose.setContent { MaterialTheme { OneTouchImportStatus(AppState(oneTouchImport=true,busy=true,
+        compose.setContent { MaterialTheme { OneTouchImportStatus(AppState(oneTouchImport=true,busy=true,connecting=true,
             message="正在读取相机共享照片")) { cancelled=true } } }
         compose.onNodeWithTag("one-touch-import").assertExists()
         compose.onNodeWithText("取消导入").performClick()
