@@ -97,6 +97,8 @@ HEIF / XAVC S 注意事项，随后创建 `DlnaConfirmSettingDialog`。
 | 视频 | 按类型和机型能力分别复制原视频、代理或两者；不支持的高码率 / AVCHD 分支会跳过或失败 |
 
 视频 / HEIF 分支是 APK 的静态证据，并不表示已在 ILCE-7RM2 上实测这些组合。
+在 DID 单张路径，`DidXmlItem.getTransferImageUrl` 对 Original / TwoMegaPixels / Vga
+分别选 JpegOriginal / JpegLarge / JpegSmall；这些再由 profile 映射到 UNKNOWN / JPEG_LRG / JPEG_SM。
 Companion 当前 JPEG 路径优先最佳 JPEG 资源，与官方默认约 2 MP 并不等价。
 
 ## 5. 取资源、下载与保存
@@ -107,7 +109,9 @@ Companion 当前 JPEG 路径优先最佳 JPEG 资源，与官方默认约 2 MP �
 `ContentDownloader` 用 P2P 网络的 NetworkUtil.openConnection 发 HTTP 请求，检查响应和长度，
 流式写入，并报告字节进度及结果。这里没有经 NFC 传输 JPEG。
 
-保存位置由 `SavingDestinationSettingUtil` 决定，支持普通路径和 Android URI / SAF 路径。
+DID 路径按资源 URL 取文件名，去除 LRG_ / ORG_ / SM_ / TN_ 前缀，RAW / MPO 的传输
+JPEG 文件名相应改为 .JPG。保存位置由 `SavingDestinationSettingUtil` 决定，支持普通路径和
+Android URI / SAF 路径。
 `ContentFile.getUniqueFilePathFromFileName` 选择不冲突的名字；该路径不是按文件内容 hash
 去重后必然跳过已存照片。`retryCopyFileWithAnotherName` 针对媒体数据库命名冲突换名重试；
 不能把它误说成 Wi-Fi 失败后自动恢复下载或断点续传。
@@ -151,6 +155,8 @@ GetPushRoot 响应，才允许发送第一字节”。结束 callback `$4` 则�
 | CompletelyFailed / 存储故障 / 一般错误等已映射错误 | 1 | 显示相应故障，结束，断开 |
 
 这是实际枚举映射；**不能按直觉把所有非全部成功都说成 ErrCode=1**。
+特别地，CannotWrite（ordinal 8）在该桥接 switch 中走默认断言分支，不属于上述正常
+ErrCode=1 映射；静态证据不足以保证这个官方异常分支成功发出结束通知。
 `AbstractCopyAction.cancel` 设置 Copy 取消状态；进度条取消与导入确认框 Cancel 的位置不同，
 后者发生在复制尚未开始时。存储满、共享中、只读、未挂载、SAF 无效等有单独错误。
 一般条目下载错误可以计失败后继续下一项，存储类错误可停止整批。
@@ -178,6 +184,13 @@ Xiaomi 23127PN0CC，SDK 35。日志没有 WARN / ERROR、丢弃记录或写入�
 | 19:47:51 -> 19:47:52 | 用户启动下载，DSC02200.JPG 保存成功，2,490,368 字节 |
 | 19:48:00 | X_TransferEnd 成功，正常断开 |
 
+这份日志还保留了 DigitalImagingDesc.xml：`X_CurrentContent_URL` 内有同一张照片的
+`type=JPG`，以及 JPEG_TN / JPEG_SM / JPEG_LRG / UNKNOWN 四类资源；UNKNOWN 明示
+2,490,368 字节、7952×5304。将这个实际描述输入官方 `CurrentContentUrl.setContentType`
+会识别为 jpeg，满足 `ContentsPush.run` 的 DID 单张分支条件。因此，**按静态代码和该次
+相机响应推断，官方在同一相机状态会走 DidXmlCopyAction**；这不是已运行官方 App 的抓包结论。
+Companion 此次从 PushRoot 浏览同一张文件，是不同但已经实机成功的获取路径。
+
 这里共享集合恰好一张，下载资源为 7952×5304 的 JPEG，不代表官方默认下载尺寸或所有共享
 集合都只有一张。约 14 秒后才开始下载也与当前 Companion 需要用户手动开始相符。
 这份日志验证的是小米上的 NFC / Wi-Fi / 服务选择 / 下载，不含主力机 NFC 未读到标签时
@@ -185,7 +198,8 @@ Xiaomi 23127PN0CC，SDK 35。日志没有 WARN / ERROR、丢弃记录或写入�
 
 ## 9. 后续适配应复用的边界
 
-完整一触分享应限于已证实的 Push 模式 / 相机共享集合。确认导入后，将共享条目交给已有
+完整一触分享应限于已证实的 Push 模式 / 相机共享集合。可优先使用当前 DID 内容；没有
+可识别 DID 内容时再枚举 PushRoot。确认导入后，将共享条目交给已有
 SmartphoneTransfer、队列、PhotoStore 和 SessionIdentity；不能将 PhotoRoot 回退当成
 “用户要分享整张卡”，不能顺带自动恢复其他历史未完成下载，也不能固定只取第一项。
 取消 / 断线 / 新会话必须使旧任务失效；完成后发结束通知并释放本次 Wi-Fi lease。
