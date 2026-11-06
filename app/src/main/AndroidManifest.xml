@@ -2,9 +2,16 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" tools:replace="android:required" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" tools:targetApi="33" />
-    <!-- Opt-in remote geotagging only: foreground, coarse/fine location. No background location and no
+    <!-- Wi-Fi pairing on API 29-32 and opt-in remote geotagging: foreground, coarse/fine location. No background location and no
          ACCESS_MEDIA_LOCATION; the phone location is only ever written into the REMOTE capture copy. -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -16,12 +23,19 @@
     <application android:name=".CompanionApplication" android:label="Alpha Companion"
         android:theme="@style/AppTheme" android:icon="@drawable/ic_camera"
         android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="true" android:supportsRtl="true" tools:targetApi="31">
-        <activity android:name=".MainActivity" android:exported="true">
+        <activity android:name=".pairing.CameraQrActivity" android:exported="false" android:screenOrientation="fullSensor" android:theme="@style/zxing_CaptureTheme" />
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/x-sony-pmm" />
             </intent-filter>
         </activity>
         <service android:name=".data.TransferService" android:exported="false" android:foregroundServiceType="dataSync" />
     </application>
 </manifest>
+

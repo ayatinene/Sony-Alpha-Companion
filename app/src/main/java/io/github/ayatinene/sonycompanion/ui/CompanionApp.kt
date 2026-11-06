@@ -88,6 +88,9 @@ private fun openAppSettings(context:Context) {
         } },
         onNotificationDenied={ message->scope.launch { snackbar.showSnackbar(message) } },
         askStore=permissionAskStore)
+    val pairing=rememberPairingActions(model,
+        onConnecting={ nav=nav.requestConnection(CameraMode.REMOTE) },
+        onMessage={ message->scope.launch { snackbar.showSnackbar(message) } })
     // Geotagging lives at app scope, so a permission revoked outside Settings is corrected on resume
     // instead of leaving the preference on while the switch reads off.
     var geotagging by rememberSaveable { mutableStateOf(controller.remoteGeotaggingEnabled && controller.locationPermissionGranted()) }
@@ -154,7 +157,7 @@ private fun openAppSettings(context:Context) {
                     when(shown) {
                         Destination.Home,Destination.Capture->Home(state,controller,
                             onOpenWorkspace={ nav=nav.copy(destination=workspaceFor(state.mode,state.remote.galleryActive),entryTarget=null) },
-                            onConnect=connectWithPermissions,permissions=requestPermissions)
+                            onConnect=connectWithPermissions,permissions=requestPermissions,pairing=pairing)
                         Destination.Gallery->CameraGallery(state,controller.galleryActions())
                         Destination.Local->LocalLibraryScreen(state,controller)
                         Destination.Settings->SettingsPage(state,controller,theme,dynamic,{theme=it;controller.prefs.edit().putString("theme",it).apply()}, {dynamic=it;controller.prefs.edit().putBoolean("dynamic",it).apply()},requestPermissions,geotagging,::enableGeotagging,::disableGeotagging)
@@ -165,10 +168,21 @@ private fun openAppSettings(context:Context) {
     }
 }
 
-@Composable private fun Home(state:AppState,c:CompanionController,onOpenWorkspace:()->Unit,onConnect:(CameraMode)->Unit,permissions:()->Unit) {
+@Composable private fun Home(state:AppState,c:CompanionController,onOpenWorkspace:()->Unit,onConnect:(CameraMode)->Unit,permissions:()->Unit,pairing:PairingActions) {
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
         item { Text("相机工作台",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.SemiBold) }
         item { HomeStatusCard(state) }
+        if(state.connecting) item { OutlinedButton(onClick=c::cancelPairing,shape=shape,modifier=Modifier.fillMaxWidth()) { Text("取消连接") } }
+        if(!state.connected) item {
+            Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick=pairing.scan,enabled=!state.busy&&!state.connecting,shape=shape,modifier=Modifier.fillMaxWidth().testTag("pairing-scan")) {
+                    Icon(Icons.Outlined.QrCodeScanner,null); Spacer(Modifier.width(8.dp)); Text("扫描相机二维码")
+                }
+                OutlinedButton(onClick=pairing.nfc,enabled=!state.busy&&!state.connecting,shape=shape,modifier=Modifier.fillMaxWidth().testTag("pairing-nfc")) {
+                    Icon(Icons.Outlined.Nfc,null); Spacer(Modifier.width(8.dp)); Text("NFC 配对")
+                }
+            }
+        }
         if(state.connected) {
             item { Button(onClick=onOpenWorkspace,shape=shape,modifier=Modifier.fillMaxWidth()) {
                 val remoteCapture=state.mode==CameraMode.REMOTE&&!state.remote.galleryActive
@@ -212,7 +226,7 @@ private fun openAppSettings(context:Context) {
                 Text(device.displayName+device.identity.firmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.labelLarge)
                 if(device.identity.lens.isNotBlank()) Text(device.identity.lens,style=MaterialTheme.typography.bodySmall)
             }
-            if(!state.connected) Text("先在相机选择工作模式，再连接对应的 Wi-Fi。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+            if(!state.connected) Text("可扫描智能遥控二维码或触碰 NFC；也可在系统连接 Wi-Fi 后选择下方模式。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -240,7 +254,7 @@ private fun openAppSettings(context:Context) {
             item { Text(device.displayName+device.identity.firmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.bodySmall) }
             if(device.identity.lens.isNotBlank()) item { Text("镜头：${device.identity.lens}"+device.identity.lensFirmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.bodySmall) }
         }
-        item { Text("请先在系统设置中连接相机 Wi-Fi，再回到应用连接。",style=MaterialTheme.typography.bodySmall) }
+        item { Text("遥控拍摄可在首页扫描二维码或使用 NFC。JPEG / 原文件传输及手动遥控仍可先连接系统 Wi-Fi。",style=MaterialTheme.typography.bodySmall) }
         item { OutlinedTextField(description,{description=it;saved=false},Modifier.fillMaxWidth(),label={Text("描述文件 URL / JPEG 模式相机 IP")},placeholder={Text("留空自动查找")},singleLine=true) }
         item { Text("RAW / 原文件传输（实验性）",style=MaterialTheme.typography.titleSmall) }
         item { Text("使用已登记的接收端 GUID；也可通过下方 USB 工具登记。",style=MaterialTheme.typography.bodySmall) }
@@ -274,3 +288,4 @@ private fun openAppSettings(context:Context) {
         Text("$usbInfo\n\n这会替换相机“发送到电脑”的接收端设置。"+(if(guid.isBlank()) "将生成并保存本应用专用 GUID。" else "将登记输入框中的 GUID。")+"如需保留电脑接收端，请先保存其 GUID。")
     },confirmButton={TextButton(onClick={registerUsb=false;c.registerUsbGuid(guid) { guid=it }}){Text("登记")}},dismissButton={TextButton(onClick={registerUsb=false}){Text("取消")}})
 }
+

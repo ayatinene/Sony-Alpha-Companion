@@ -8,6 +8,7 @@ import android.util.LruCache
 import androidx.core.content.ContextCompat
 import io.github.ayatinene.sonycompanion.protocol.*
 import io.github.ayatinene.sonycompanion.network.*
+import io.github.ayatinene.sonycompanion.pairing.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
@@ -86,7 +87,7 @@ class CompanionController(private val context: Context) {
         val gen: Long, val snapshot: AppState,
         val http: CameraHttp?, val computer: ComputerTransfer?, val smartphone: SmartphoneTransfer?, val remote: RemoteCamera?,
         val queue: Job?, val identity: Job?, val scan: Job?, val gallery: Job?, val monitoring: List<Job>, val monitoringStop: Job?,
-        val ownConnection: Job?, val attempt: PendingResources, val actions: List<Job>, val effectiveGraceful: Boolean)
+        val ownConnection: Job?, val attempt: PendingResources, val pairing: PairingConnection<Network>?, val actions: List<Job>, val effectiveGraceful: Boolean)
     private val backgroundActive = MutableStateFlow(false)
     /** True while any scan or download holds a background lease. The service observes this instead of
      * inferring from scan/transferring, so a pending start is never torn down before it becomes ready. */
@@ -121,6 +122,8 @@ class CompanionController(private val context: Context) {
     private val captureBinding = CaptureGeoBinding()
     private val protocolResponses = Collections.synchronizedMap(linkedMapOf<String,String>())
     private var selectedNetwork: Network? = null
+    private var pairingConnection: PairingConnection<Network>? = null
+    internal var pairingBackend: PairingBackend<Network> = AndroidPairingBackend(context)
     private var lastUsbDescription = ""
     private var visible = true
     private val cm = context.getSystemService(ConnectivityManager::class.java)
@@ -143,7 +146,9 @@ class CompanionController(private val context: Context) {
                 log("Wi-Fi 可用 network=$network",LogLevel.DEBUG,"CONNECT")
             }
             override fun onLost(network: Network) {
-                if(network==selectedNetwork) scope.launch {
+                val lostGeneration=identity.currentGeneration
+                if(network==selectedNetwork && pairingConnection==null) scope.launch {
+                    if(identity.currentGeneration!=lostGeneration || network!=selectedNetwork || pairingConnection!=null) return@launch
                     log("相机 Wi-Fi 丢失 network=$network",LogLevel.WARN,"CONNECT")
                     cancelTransfers(); disconnect(false)
                     update { copy(error="相机 Wi-Fi 已断开，请重新连接",message="连接已断开") }
@@ -331,7 +336,10 @@ class CompanionController(private val context: Context) {
             log("USB GUID 登记完成，接收端设置已保存",tag="USB")
         } finally { update { copy(busy=false) } }
     }
-    fun connect(mode: CameraMode): Boolean {
+    fun connect(mode: CameraMode): Boolean = connect(mode, null)
+    fun pairCamera(credentials: PairingCredentials): Boolean = connect(CameraMode.REMOTE, credentials)
+    fun cancelPairing() { scope.launch { disconnect(false) } }
+    private fun connect(mode: CameraMode, credentials: PairingCredentials?): Boolean {
         if(state.value.busy) return false
         if(state.value.transferring) { update { copy(error="请先完成或取消文件传输") }; return false }
         if(connectionJob?.isActive==true) return false
@@ -351,7 +359,24 @@ class CompanionController(private val context: Context) {
                     // controller against a local server without a camera or Wi-Fi.
                     val testOverride=sessionOverride
                     val networks = CameraNetwork(context)
-                    val network = if(testOverride==null) networks.wifi() else null; selectedNetwork=network
+                    val network = if(credentials!=null) {
+                        update { copy(message="等待 Android 确认连接相机 Wi-Fi…") }
+                        val pairGen=gen
+                        lateinit var lease: PairingConnection<Network>
+                        lease=PairingConnection(pairingBackend) { lost -> scope.launch {
+                            if(identity.currentGeneration!=pairGen || pairingConnection!==lease) return@launch
+                            disconnect(false)
+                            if(identity.currentGeneration==pairGen+1) update { copy(error="相机 Wi-Fi 已断开，请重新配对",message="连接已断开") }
+                        } }
+                        pairingConnection=lease
+                        attempt.register { lease.close() }
+                        lease.await(credentials).also {
+                            currentCoroutineContext().ensureActive()
+                            check(identity.currentGeneration==gen && !lease.isClosed) { "配对已取消" }
+                            update { copy(message="Wi-Fi 已连接，正在查找相机 REMOTE 服务…") }
+                        }
+                    } else if(testOverride==null) networks.wifi() else null
+                    selectedNetwork=network
                     log("绑定 Wi-Fi network=$network",LogLevel.DEBUG,"CONNECT")
                     val transport = testOverride?.transport ?: CameraHttp(network,trace={ label,response ->
                         synchronized(protocolResponses) {
@@ -406,7 +431,9 @@ class CompanionController(private val context: Context) {
                         startScan()
                     } else {
                         val devices = testOverride?.devices
-                            ?: networks.discover(network!!,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
+                            ?: if(credentials!=null) discoverPairedCamera {
+                                networks.discover(network!!,transport,true,"")
+                            } else networks.discover(network!!,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
                         if(identity.currentGeneration!=gen) { attempt.abortAll(); return@launch }
                         require(devices.size==1) {
                             if(devices.isEmpty()) "没有发现相机。请确认相机工作模式、Wi-Fi 和附近设备权限，或在设置填写描述文件 URL。"
@@ -487,6 +514,7 @@ class CompanionController(private val context: Context) {
                     // Never let a superseded connect overwrite a newer session's state.
                     whenGeneration(gen) {
                         computer=null; http=null; smartphone=null; remote=null
+                        pairingConnection?.close(); pairingConnection=null; selectedNetwork=null
                         update { copy(connected=false,error=e.message,message="连接失败",scan=ScanState()) }
                     }
                 }
@@ -674,6 +702,7 @@ class CompanionController(private val context: Context) {
             val monitoringStopJob=monitoringStop
             val ownConnection=connectionJob?.takeIf { it.isActive && it!==self }
             val attempt=pendingConnection; pendingConnection=PendingResources()
+            val pairing=pairingConnection; pairingConnection=null
             val graceful=gracefulRequested && actions.isEmpty()
             if(!graceful) oldRemote?.disallowCleanup()
             userScanPaused=false
@@ -681,7 +710,7 @@ class CompanionController(private val context: Context) {
             avContent=null; avContentSource=null; galleryPager=null; avContentEndpoint=null
             captureBinding.clear()
             update { copy(connected=false,connecting=false,busy=false,transferring=false,folder="",galleryPath=emptyList(),scan=ScanState()) }
-            DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,oldGallery,monitoring,monitoringStopJob,ownConnection,attempt,actions,graceful)
+            DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,oldGallery,monitoring,monitoringStopJob,ownConnection,attempt,pairing,actions,graceful)
         }
         if(!detached.effectiveGraceful) {
             runCatching { detached.computer?.abort() }
@@ -701,6 +730,7 @@ class CompanionController(private val context: Context) {
         log("断开开始 finish=$finish allowSonySleep=$allowSonySleep connected=${snapshot.connected}",LogLevel.DEBUG,"CONNECT")
         val self=coroutineContext[Job]
         val d=detachSession(snapshot,self,gracefulRequested=finish)
+        try {
         runCatching { d.attempt.abortAll() }
         background.reset("disconnect")
         if(snapshot.device!=null) { lastDevice=snapshot.device; lastRemote=snapshot.remote; lastMode=snapshot.mode }
@@ -745,6 +775,7 @@ class CompanionController(private val context: Context) {
         whenGeneration(d.gen) { thumbs.evictAll(); remoteThumbs.evictAll(); importedUrls.clear() }
         whenGeneration(d.gen) { update { copy(connected=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") } }
         log("断开完成",LogLevel.DEBUG,"CONNECT")
+        } finally { d.pairing?.close() }
     }
     fun endSession() {
         if(state.value.transferring) return
@@ -1766,3 +1797,4 @@ class CompanionController(private val context: Context) {
         }.toString(2)
     }
 }
+

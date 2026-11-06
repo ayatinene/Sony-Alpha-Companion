@@ -49,6 +49,7 @@ dependencies {
     implementation(libs.coroutines)
     implementation(libs.okhttp)
     implementation(libs.exif)
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     debugImplementation(libs.compose.tooling)
     debugImplementation(libs.compose.test.manifest)
     androidTestImplementation(platform(libs.compose.bom))
@@ -61,3 +62,4 @@ dependencies {
     testImplementation(libs.mockwebserver)
     testImplementation(libs.coroutines.test)
 }
+
