@@ -59,7 +59,7 @@ class RemoteGalleryIntegrationTest {
     private inner class GalleryCamera(private val server: MockWebServer) : Dispatcher() {
         @Volatile var function = "Remote Shooting"
         @Volatile var status = "IDLE"
-        @Volatile var cameraFunctionFails = false
+        val cameraFunctionFailuresRemaining = java.util.concurrent.atomic.AtomicInteger(0)
         val calls = Collections.synchronizedList(mutableListOf<String>())
         val contentCount = 45
         val dateUri = "storage:memorycard1?path=2026-01-02"
@@ -86,7 +86,7 @@ class RemoteGalleryIntegrationTest {
             "getApplicationInfo" -> ok(JSONArray().put("Smart Remote").put("1.0"))
             "getSupportedCameraFunction" -> ok(JSONArray().put(JSONArray().put("Remote Shooting").put("Contents Transfer")))
             "getMethodTypes" -> ok(JSONArray().put(row("setCameraFunction","1.0")).put(row("getEvent","1.0")))
-            "getCameraFunction" -> if(cameraFunctionFails) fail(12) else ok(JSONArray().put(function))
+            "getCameraFunction" -> if(cameraFunctionFailuresRemaining.getAndUpdate { n -> (n-1).coerceAtLeast(0) } > 0) fail(12) else ok(JSONArray().put(function))
             "getEvent" -> ok(JSONArray().put(JSONObject().put("type","cameraStatus").put("cameraStatus",status))
                 .put(JSONObject().put("type","availableApiList").put("names",apis)))
             "startLiveview" -> ok(JSONArray().put(server.url("/liveview").toString()))
@@ -222,7 +222,8 @@ class RemoteGalleryIntegrationTest {
             connectGallery(server,camera,visible=true)
             controller.openRemoteGallery()
             waitUntil(20_000) { controller.state.value.remote.galleryActive && !controller.state.value.remote.remoteSwitching }
-            camera.cameraFunctionFails=true
+            // Simulate a transient error, not a permanently broken cameraFunction endpoint.
+            camera.cameraFunctionFailuresRemaining.set(2)
             val liveViewsBefore=camera.calls.count { it=="startLiveview" }
             controller.returnToRemoteCapture()
             waitUntil(20_000) { !controller.state.value.remote.galleryActive }
