@@ -2,7 +2,6 @@ package io.github.ayatinene.sonycompanion.data
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 
 /**
@@ -29,11 +28,15 @@ internal class RemoteThumbnailScheduler(
 
     suspend fun <T : Any> load(key: String, cached: () -> T?, fetch: suspend () -> T?): T? {
         cached()?.let { return it }
-        return locks[(key.hashCode() and Int.MAX_VALUE) % locks.size].withLock {
-            cached()?.let { return@withLock it }
-            gate.withPermit {
+        val mutex=locks[(key.hashCode() and Int.MAX_VALUE) % locks.size]
+        mutex.lock()
+        try {
+            cached()?.let { return it }
+            return gate.withPermit {
                 cached() ?: fetch()
             }
+        } finally {
+            mutex.unlock()
         }
     }
 }

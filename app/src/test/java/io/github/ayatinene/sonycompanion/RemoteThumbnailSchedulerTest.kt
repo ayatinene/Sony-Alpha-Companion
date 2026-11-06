@@ -19,7 +19,7 @@ class RemoteThumbnailSchedulerTest {
             async(Dispatchers.Default) {
                 scheduler.load("thumb-$n",{null as String?}) {
                     val count=active.incrementAndGet()
-                    maximum.accumulateAndGet(count,::maxOf)
+                    maximum.accumulateAndGet(count) { current, candidate -> maxOf(current,candidate) }
                     started.incrementAndGet()
                     try { release.await(); "image-$n" }
                     finally { active.decrementAndGet() }
@@ -43,7 +43,7 @@ class RemoteThumbnailSchedulerTest {
         val jobs=(0 until 4).map { n -> async(Dispatchers.Default) {
             scheduler.load("thumb-$n",{null as Int?}) {
                 val now=active.incrementAndGet()
-                maximum.accumulateAndGet(now,::maxOf)
+                maximum.accumulateAndGet(now) { current, candidate -> maxOf(current,candidate) }
                 try { delay(30); n } finally { active.decrementAndGet() }
             }
         } }
