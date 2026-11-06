@@ -223,7 +223,8 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=16.dp),
             horizontalArrangement=Arrangement.spacedBy(6.dp), verticalAlignment=Alignment.CenterVertically) {
             listOf("全部", "JPEG", "ARW").filter { state.mode != CameraMode.JPEG || it != "ARW" }.forEach { name ->
-                FilterChip(selected = filter == name, onClick = { if (filter != name) { filter = name; requestTop() } }, label = { Text(name) })
+                FilterChip(selected = filter == name, onClick = { if (filter != name) { filter = name; requestTop() } },
+                    label = { Text(name) }, modifier = Modifier.testTag("gallery-filter-$name"))
             }
             if (state.mode == CameraMode.JPEG) {
                 var menu by remember { mutableStateOf(false) }

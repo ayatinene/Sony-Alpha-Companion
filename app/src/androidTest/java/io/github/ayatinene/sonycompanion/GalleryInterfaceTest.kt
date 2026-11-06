@@ -70,11 +70,11 @@ class GalleryInterfaceTest {
         var state by mutableStateOf(jpeg(listOf(jpegFile("a"))))
         compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions()) } }
         compose.onNodeWithContentDescription("返回根目录").assertExists()
-        compose.onNodeWithText("ARW").assertDoesNotExist()
+        compose.onNodeWithTag("gallery-filter-ARW").assertDoesNotExist()
         compose.onNodeWithText("仅下载相机实际提供的 JPEG 尺寸",substring=true).assertExists()
         compose.runOnIdle { state=computer(listOf(rawFile("r")),ScanState(phase=ScanPhase.Done)) }
         compose.onNodeWithContentDescription("返回根目录").assertDoesNotExist()
-        compose.onNodeWithText("ARW").assertExists()
+        compose.onNodeWithTag("gallery-filter-ARW").assertExists()
     }
 
     @Test fun jpegDateFolderCanReturnToParentWithoutReconnect() {
@@ -106,7 +106,7 @@ class GalleryInterfaceTest {
         val enqueued=mutableListOf<List<CameraFile>>()
         render(computer(listOf(rawFile("a"),jpegFile("b")),ScanState(phase=ScanPhase.Done)),GalleryActions(enqueue={files,_->enqueued+=files}))
         compose.onNodeWithText("全选 2").performClick()
-        compose.onNodeWithText("ARW").performClick()
+        compose.onNodeWithTag("gallery-filter-ARW").performClick()
         compose.onNodeWithText("另有 1 项被筛选隐藏，不会下载。").assertExists()
         compose.onNodeWithText("下载 1 个文件").performClick()
         compose.runOnIdle {
@@ -301,7 +301,7 @@ class GalleryInterfaceTest {
         render(computer(listOf(rawFile("a"),jpegFile("b")),ScanState(phase=ScanPhase.Done)))
         compose.onNodeWithTag("gallery-item-a").performTouchInput { longClick() }
         compose.onNodeWithTag("gallery-item-b").performTouchInput { longClick() }
-        compose.onNodeWithText("ARW").performClick()
+        compose.onNodeWithTag("gallery-filter-ARW").performClick()
         compose.onNodeWithText("另有 1 项被筛选隐藏，不会下载。").assertExists()
         compose.onNodeWithTag("gallery-layout-toggle").performClick()
         compose.onNodeWithTag("gallery-list").assertExists()
@@ -462,14 +462,14 @@ class GalleryInterfaceTest {
         val restoration=StateRestorationTester(compose)
         restoration.setContent { MaterialTheme { CameraGallery(computer(listOf(rawFile("a"),jpegFile("b")),ScanState(phase=ScanPhase.Done)),GalleryActions()) } }
         compose.onNodeWithTag("gallery-layout-toggle").performClick()
-        compose.onNodeWithText("ARW").performClick()
+        compose.onNodeWithTag("gallery-filter-ARW").performClick()
         compose.onNodeWithTag("gallery-sort-menu").performClick()
         compose.onNodeWithTag("gallery-sort-Oldest").performClick()
         compose.onNodeWithTag("gallery-list").assertExists()
         restoration.emulateSavedInstanceStateRestore()
         compose.onNodeWithTag("gallery-list").assertExists()
         compose.onNodeWithContentDescription("排序：拍摄时间：最早优先").assertExists()
-        compose.onNodeWithText("ARW").assertIsSelected()
+        compose.onNodeWithTag("gallery-filter-ARW").assertIsSelected()
     }
 
     @Test fun stateRestorationKeepsTheListScrollPosition() {
@@ -556,9 +556,9 @@ class GalleryInterfaceTest {
 
     @Test fun remoteGalleryOffersTheJpegAndArwFilters() {
         render(remoteGallery(listOf(rawFile("a"),jpegFile("b")),RemoteState(canBrowseGallery=true,loadedContentCount=2)))
-        compose.onNodeWithText("ARW").assertExists()
+        compose.onNodeWithTag("gallery-filter-ARW").assertExists()
         compose.onNodeWithText("可按 JPEG / ARW 筛选并下载相机原文件。").assertExists()
-        compose.onNodeWithText("ARW").performClick()
+        compose.onNodeWithTag("gallery-filter-ARW").performClick()
         compose.onNodeWithTag("gallery-item-a").assertExists()
         compose.onNodeWithTag("gallery-item-b").assertDoesNotExist()
     }
