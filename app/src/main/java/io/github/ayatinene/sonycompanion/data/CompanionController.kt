@@ -527,19 +527,22 @@ class CompanionController(private val context: Context) {
                     // A forced detach has already changed generation and must never send cleanup RPCs.
                     val cancelledShare=identity.currentGeneration==gen && nfcAuto && state.value.oneTouchImport
                     if(cancelledShare) whenGeneration(gen) { update { copy(message="正在结束一触分享…") } }
-                    withContext(NonCancellable+Dispatchers.IO) {
-                        if(cancelledShare) {
-                            smartphoneAttempt?.setOneTouchResult(OneTouchResult.Cancelled)
-                            runCatching { withTimeout(INIT_FINISH_TIMEOUT_MILLIS) { smartphoneAttempt?.finish() } }
-                                .onFailure { log("取消准备后结束一触分享：${it.message}",LogLevel.WARN,"SHARE",it) }
+                    withContext(NonCancellable) {
+                        withContext(Dispatchers.IO) {
+                            if(cancelledShare) {
+                                smartphoneAttempt?.setOneTouchResult(OneTouchResult.Cancelled)
+                                runCatching { withTimeout(INIT_FINISH_TIMEOUT_MILLIS) { smartphoneAttempt?.finish() } }
+                                    .onFailure { log("取消准备后结束一触分享：${it.message}",LogLevel.WARN,"SHARE",it) }
+                            }
+                            attempt.abortAll()
                         }
-                        attempt.abortAll()
-                    }
-                    whenGeneration(gen) {
-                        computer=null; http=null; smartphone=null; remote=null
-                        if(cancelledShare) {
-                            pairingConnection=null; pairedCredentials=null; selectedNetwork=null
-                            update { copy(connected=false,oneTouchImport=false,device=null,error=null,message="一触分享已取消") }
+                        // Publish on the owning dispatcher before returning to the cancelled context.
+                        whenGeneration(gen) {
+                            computer=null; http=null; smartphone=null; remote=null
+                            if(cancelledShare) {
+                                pairingConnection=null; pairedCredentials=null; selectedNetwork=null
+                                update { copy(connected=false,oneTouchImport=false,device=null,error=null,message="一触分享已取消") }
+                            }
                         }
                     }
                     throw e
