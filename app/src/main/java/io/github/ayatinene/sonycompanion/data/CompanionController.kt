@@ -522,10 +522,26 @@ class CompanionController(private val context: Context) {
                         loadIdentity(device,transport)
                     }
                 } catch(e: CancellationException) {
-                    // Cancelled mid-initialization: abort this attempt's own transport to unblock the
-                    // blocking call before the caller joins.
-                    withContext(NonCancellable+Dispatchers.IO) { attempt.abortAll() }
-                    whenGeneration(gen) { computer=null; http=null; smartphone=null; remote=null }
+                    // A user-cancelled share still owns its Wi-Fi/HTTP during preparation. Cancel the
+                    // pending read first, then end the started share before releasing that transport.
+                    // A forced detach has already changed generation and must never send cleanup RPCs.
+                    val cancelledShare=identity.currentGeneration==gen && nfcAuto && state.value.oneTouchImport
+                    if(cancelledShare) whenGeneration(gen) { update { copy(message="正在结束一触分享…") } }
+                    withContext(NonCancellable+Dispatchers.IO) {
+                        if(cancelledShare) {
+                            smartphoneAttempt?.setOneTouchResult(OneTouchResult.Cancelled)
+                            runCatching { withTimeout(INIT_FINISH_TIMEOUT_MILLIS) { smartphoneAttempt?.finish() } }
+                                .onFailure { log("取消准备后结束一触分享：${it.message}",LogLevel.WARN,"SHARE",it) }
+                        }
+                        attempt.abortAll()
+                    }
+                    whenGeneration(gen) {
+                        computer=null; http=null; smartphone=null; remote=null
+                        if(cancelledShare) {
+                            pairingConnection=null; pairedCredentials=null; selectedNetwork=null
+                            update { copy(connected=false,oneTouchImport=false,device=null,error=null,message="一触分享已取消") }
+                        }
+                    }
                     throw e
                 }
                 catch(e: Exception) {
@@ -662,7 +678,7 @@ class CompanionController(private val context: Context) {
         if(!snapshot.oneTouchImport || (!snapshot.connected && !snapshot.connecting)) return
         log("用户取消一触分享导入",tag="SHARE")
         val job=oneTouchJob
-        if(job!=null) job.cancel() else cancelPairing()
+        if(job!=null) job.cancel() else connectionJob?.cancel()
     }
     /**
      * Reads and publishes the saved queue for [gen] atomically: a superseded attempt must not publish
@@ -1759,9 +1775,10 @@ class CompanionController(private val context: Context) {
                         }
                         if(!isPtp && resource==null) error("相机没有提供可下载的文件")
                         val isRaw=(isPtp && file.raw) || (isHttpOriginal && file.format==AV_CONTENT_FORMAT_RAW)
-                        val name=if(!isRaw && file.name.endsWith(".arw",true)) file.name.substringBeforeLast('.')+".JPG" else file.name
+                        val name=if(!isRaw && resource?.isJpeg==true) file.jpegDownloadName() else file.name
                         val source=transferSource(sessionScope,file,resource)
-                        val expected=resource?.size?.takeIf { it>0 } ?: file.size
+                        // A derivative's unknown size must not inherit the RAW/MPO original's size.
+                        val expected=resource?.size?.coerceAtLeast(0) ?: file.size
                         // An HTTP original's authoritative length is the response Content-Length (the
                         // listing size can be absent or differ). Passing 0 lets StreamCopy's own
                         // Content-Length check stand and keeps import from rejecting a valid file whose

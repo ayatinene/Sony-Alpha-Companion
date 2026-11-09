@@ -49,6 +49,25 @@ class OneTouchSharingTest {
         val thumb="<root><X_CurrentContent_URL><X_CurrentContent_URL_URL type=\"JPG\" profileID=\"JPEG_TN\">/TN_A.JPG?q</X_CurrentContent_URL_URL></X_CurrentContent_URL></root>"
         assertNull(currentSharedJpeg(thumb,did,camera))
     }
+    @Test fun pushRootMpoSelectsOnlyItsJpegDerivativeAndUsesAJpegDownloadName() = runBlocking {
+        for(extension in listOf("MPO","mpo","ARW")) {
+            val original=Resource("http://camera/original.$extension","image/mpo",10000)
+            val large=Resource("http://camera/large.$extension","image/jpeg",400,"2000x1000",
+                "http-get:*:image/jpeg:DLNA.ORG_PN=JPEG_LRG")
+            val small=large.copy(url="http://camera/small.$extension",size=200,resolution="1000x500",
+                profile="http-get:*:image/jpeg:DLNA.ORG_PN=JPEG_SM")
+            val file=CameraFile("selected","DSC12345.$extension",listOf(original,small,large),size=10000,parent="PushRoot")
+            val selected=selectedSharedJpegs(listOf(file),camera) { error("no folders") }.single()
+            assertEquals(file,selected) // Queue/retry/dedup still use the camera's original metadata.
+            assertEquals(large,selected.bestResource())
+            assertEquals("DSC12345.JPG",selected.jpegDownloadName())
+        }
+        assertEquals("A.JPEG",photo("A").copy(name="A.JPEG").jpegDownloadName())
+        val mpoOnly=CameraFile("mpo","A.MPO",listOf(Resource("http://camera/A.MPO","image/mpo")))
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { selectedSharedJpegs(listOf(mpoOnly),camera) { emptyList() } }
+        }
+    }
     @Test fun unsupportedMixedExternalAndUnsafeCurrentItemsAreRejected() {
         for(xml in listOf(current("MP4"),current("HIF"),current().replaceFirst("type=\"JPG\"","type=\"ARW\""),
             current().replace("http://camera:","http://other:"),current().replace("ORG_DSC12345.JPG","ORG_%2Fsecret.JPG"))) {

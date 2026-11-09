@@ -1,5 +1,7 @@
 name: Android UI
 on:
+  pull_request:
+    paths: ['app/**', 'gradle/**', '.github/workflows/android-ui.yml', '.github/scripts/run_ui_tests.sh']
   push:
     branches: [main]
     paths: ['app/**', 'gradle/**', '.github/workflows/android-ui.yml', '.github/scripts/run_ui_tests.sh']

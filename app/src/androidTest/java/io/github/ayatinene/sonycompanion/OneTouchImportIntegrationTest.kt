@@ -4,6 +4,8 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.Uri
+import android.provider.MediaStore
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -79,6 +81,7 @@ class OneTouchImportIntegrationTest {
         val progress=CopyOnWriteArrayList<String>()
         val starts=AtomicInteger()
         val folderReads=CountDownLatch(1)
+        val preparationReads=CountDownLatch(1)
         val endStarted=CountDownLatch(1)
         val allowEnd=CountDownLatch(1)
         @Volatile var blockEnd=false
@@ -88,6 +91,11 @@ class OneTouchImportIntegrationTest {
         @Volatile var slow=false
         @Volatile var blockFolder=false
         @Volatile var multi=false
+        @Volatile var blockDid=false
+        @Volatile var blockRoot=false
+        @Volatile var blockStart=false
+        @Volatile var mpo=false
+        @Volatile var jpegSizeKnown=true
         val device: Device
         init {
             server.start()
@@ -99,7 +107,11 @@ class OneTouchImportIntegrationTest {
                     val action=request.getHeader("SOAPACTION").orEmpty()
                     val body=request.body.readUtf8()
                     return when {
-                        action.contains("#X_TransferStart") -> { starts.incrementAndGet();MockResponse().setBody("<Envelope/>") }
+                        action.contains("#X_TransferStart") -> {
+                            starts.incrementAndGet()
+                            if(blockStart) { preparationReads.countDown();MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE) }
+                            else MockResponse().setBody("<Envelope/>")
+                        }
                         action.contains("#X_TransferEnd") -> {
                             ends+=body
                             if(blockEnd) { endStarted.countDown();allowEnd.await(5,TimeUnit.SECONDS) }
@@ -107,12 +119,14 @@ class OneTouchImportIntegrationTest {
                         }
                         action.contains("#X_TransferProgress") -> { progress+=body;MockResponse().setBody("<Envelope/>") }
                         action.contains("#X_GetPushRoot") -> MockResponse().setBody("<Envelope/>")
+                        request.path=="/did.xml" && blockDid -> { preparationReads.countDown();MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE) }
                         request.path=="/did.xml" -> MockResponse().setBody("<root><X_CurrentContent_URL>"+
                             "<X_CurrentContent_URL_URL profileID=\"JPEG_TN\" type=\"JPG\">${server.url("/thumb/$name")}</X_CurrentContent_URL_URL>"+
                             "<X_CurrentContent_URL_URL profileID=\"UNKNOWN\" type=\"JPG\" size=\"${bytes.size}\" resolution=\"2x2\">${server.url("/ORG_$name")}?item=selected</X_CurrentContent_URL_URL>"+"</X_CurrentContent_URL></root>")
                         action.contains("#Browse") -> {
                             val id=body.substringAfter("<ObjectID>").substringBefore("</ObjectID>");browses+=id
                             when {
+                                id=="PushRoot" && blockRoot -> { preparationReads.countDown();MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE) }
                                 id=="folder" && blockFolder -> { folderReads.countDown();MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE) }
                                 empty -> page("")
                                 id=="PushRoot" && multi -> page(item("A",name)+"<container id=\"folder\"><title>selected</title></container>")
@@ -121,6 +135,7 @@ class OneTouchImportIntegrationTest {
                             }
                         }
                         request.path.orEmpty().startsWith("/thumb/") -> MockResponse().setBody(Buffer().write(bytes))
+                        request.path.orEmpty().startsWith("/mpo/") -> { downloads+=request.path.orEmpty();MockResponse().setResponseCode(400) }
                         request.path.orEmpty().startsWith("/ORG_") || request.path.orEmpty().startsWith("/file/") -> {
                             val path=request.path.orEmpty();downloads+=path
                             if(failAll || (failFirst && path.contains(name))) MockResponse().setResponseCode(400)
@@ -131,7 +146,13 @@ class OneTouchImportIntegrationTest {
                 }
             }
         }
-        private fun item(id: String, name: String)="<item id=\"$id\"><title>$name</title><albumArtURI>${server.url("/thumb/$name")}</albumArtURI><res protocolInfo=\"http-get:*:image/jpeg:*\" size=\"${bytes.size}\" resolution=\"2x2\">${server.url("/file/$name")}</res></item>"
+        private fun item(id: String, name: String): String {
+            val title=if(mpo) name.substringBeforeLast('.')+".MPO" else name
+            val original=if(mpo) "<res protocolInfo=\"http-get:*:image/mpo:*\" size=\"999999\" resolution=\"6000x4000\">${server.url("/mpo/$title")}</res>" else ""
+            val length=if(jpegSizeKnown) " size=\"${bytes.size}\"" else ""
+            val profile=if(mpo) "DLNA.ORG_PN=JPEG_LRG" else "*"
+            return "<item id=\"$id\"><title>$title</title><albumArtURI>${server.url("/thumb/$name")}</albumArtURI>$original<res protocolInfo=\"http-get:*:image/jpeg:$profile\"$length resolution=\"2x2\">${server.url("/file/$name")}</res></item>"
+        }
         private fun page(contents: String): MockResponse {
             val count=Regex("<(item|container) ").findAll(contents).count()
             val xml=("<DIDL-Lite>"+contents+"</DIDL-Lite>").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -225,6 +246,79 @@ class OneTouchImportIntegrationTest {
             val http=camera.connect();assertTrue(camera.folderReads.await(8,TimeUnit.SECONDS))
             controller.cancelOneTouchImport();completed(http)
             assertTrue(camera.downloads.isEmpty());assertTrue(camera.ends.single().contains("<ErrCode>2</ErrCode>"))
+        }
+    }
+    @Test fun cancellingDuringDidOrInitialPushRootEndsBeforeReleasingWifi() {
+        for(did in listOf(true,false)) Camera(did).use { camera ->
+            camera.blockDid=did;camera.blockRoot=!did;camera.blockEnd=true
+            val releases=backend.releases.get()
+            val http=camera.connect()
+            try {
+                assertTrue(camera.preparationReads.await(8,TimeUnit.SECONDS))
+                assertTrue(controller.state.value.connecting);assertFalse(controller.state.value.connected)
+                controller.cancelOneTouchImport()
+                assertTrue(camera.endStarted.await(3,TimeUnit.SECONDS))
+                controller.cancelOneTouchImport() // Repeated taps cannot send a second End.
+                assertFalse(http.isClosed);assertEquals(releases,backend.releases.get())
+                assertTrue(controller.state.value.busy);assertTrue(controller.backgroundActiveFlow.value)
+                assertFalse(controller.pairCamera(PairingCredentials.create("DIRECT-test:ILCE-7RM2","testPass"),PairingSource.NFC))
+            } finally { camera.allowEnd.countDown() }
+            completed(http)
+            assertTrue(controller.state.value.message.contains("已取消"))
+            assertFalse(controller.state.value.connecting)
+            assertTrue(camera.downloads.isEmpty());assertTrue(camera.progress.isEmpty())
+            assertTrue(camera.ends.single().contains("<ErrCode>2</ErrCode>"))
+        }
+    }
+    @Test fun preparationNotificationCancelUsesEndWithTwo() {
+        Camera(false).use { camera ->
+            camera.blockRoot=true
+            val http=camera.connect();assertTrue(camera.preparationReads.await(8,TimeUnit.SECONDS))
+            scenario.moveToState(Lifecycle.State.CREATED)
+            context.startService(Intent(context,TransferService::class.java).setAction("cancel"))
+            completed(http)
+            assertTrue(camera.ends.single().contains("<ErrCode>2</ErrCode>"))
+            assertTrue(camera.downloads.isEmpty())
+        }
+    }
+    @Test fun cancellationBeforeStartAcknowledgementDoesNotSendAnUnownedEnd() {
+        Camera(false).use { camera ->
+            camera.blockStart=true
+            val http=camera.connect();assertTrue(camera.preparationReads.await(8,TimeUnit.SECONDS))
+            controller.cancelOneTouchImport();completed(http)
+            assertTrue(camera.ends.isEmpty());assertTrue(camera.browses.isEmpty());assertTrue(camera.downloads.isEmpty())
+        }
+    }
+    @Test fun forcedDisconnectDuringPreparationCannotSendEndOrAffectTheNextShare() {
+        Camera(false).use { old -> Camera().use { next ->
+            old.blockRoot=true
+            val first=old.connect();assertTrue(old.preparationReads.await(8,TimeUnit.SECONDS))
+            runBlocking { controller.disconnect(false) }
+            assertTrue(first.isClosed);assertTrue(old.ends.isEmpty())
+            val fresh=next.connect();completed(fresh)
+            assertTrue(next.ends.single().contains("<ErrCode>0</ErrCode>"))
+            assertEquals(1,next.downloads.size)
+        } }
+    }
+    @Test fun pushRootMpoDerivativeHasJpegNameMimeAndBytesAndDeduplicates() {
+        for(known in listOf(true,false)) Camera(false).use { camera ->
+            camera.mpo=true;camera.jpegSizeKnown=known
+            val http=camera.connect();completed(http)
+            waitFor { controller.state.value.message.contains("一触分享完成") }
+            val photo=controller.photos.list().single { it.name==camera.name }
+            val uri=Uri.parse(photo.uri)
+            assertEquals("image/jpeg",context.contentResolver.getType(uri))
+            context.contentResolver.query(uri,arrayOf(MediaStore.Images.Media.DISPLAY_NAME,MediaStore.Images.Media.IS_PENDING),null,null,null)!!.use { row ->
+                assertTrue(row.moveToFirst());assertEquals(camera.name,row.getString(0));assertEquals(0,row.getInt(1))
+            }
+            context.contentResolver.openInputStream(uri)!!.use { assertArrayEquals(camera.bytes,it.readBytes()) }
+            assertEquals(camera.bytes.size.toLong(),photo.sourceBytes)
+            assertEquals(1,camera.downloads.size);assertFalse(camera.downloads.any { it.startsWith("/mpo/") })
+            assertTrue(controller.state.value.queue.single().file.name.endsWith(".MPO"))
+            val repeated=camera.connect();completed(repeated)
+            waitFor { controller.state.value.message.contains("已存在 1 张") }
+            assertEquals(1,camera.downloads.size)
+            assertEquals(2,camera.ends.size);assertTrue(camera.ends.all { it.contains("<ErrCode>0</ErrCode>") })
         }
     }
 
