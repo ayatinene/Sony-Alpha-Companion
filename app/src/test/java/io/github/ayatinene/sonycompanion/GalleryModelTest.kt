@@ -208,12 +208,25 @@ class GalleryModelTest {
         val zone = ZoneOffset.UTC
         assertEquals(captureTimeMillis("2026-10-24", zone), folderDateMillis("2026-10-24", zone))
         // A bare digit run, a camera directory and impossible dates never become a time.
-        assertNull(folderDateMillis("20261024", zone))
+        assertEquals(captureTimeMillis("2026-10-24", zone), folderDateMillis("20261024", zone))
         assertNull(folderDateMillis("100MSDCF", zone))
         assertNull(folderDateMillis("DSC00042.JPG", zone))
         assertNull(folderDateMillis("2026-2-4", zone))
         assertNull(folderDateMillis("2026-13-01", zone))
         assertNull(folderDateMillis("2026-02-30", zone))
+        assertNull(folderDateMillis("20260230", zone))
+        assertNull(folderDateMillis("20261301", zone))
+        assertNull(folderDateMillis("00000000", zone))
+    }
+
+    @Test fun sonyCompactDateFoldersSortByActualDate() {
+        val early=CameraFile("early","20250102",container=true)
+        val late=CameraFile("late","20251105",container=true)
+        val mixed=CameraFile("mixed","2025-10-01",container=true)
+        assertEquals(listOf("late","mixed","early"),
+            gallerySorted(listOf(early,late,mixed),GallerySort.Newest).map { it.id })
+        assertEquals(listOf("early","mixed","late"),
+            gallerySorted(listOf(early,late,mixed),GallerySort.Oldest).map { it.id })
     }
 
     @Test fun undatedFoldersThatDoNotLookLikeDatesStayUnknownAndSortLast() {

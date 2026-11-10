@@ -8,6 +8,7 @@ import android.util.LruCache
 import androidx.core.content.ContextCompat
 import io.github.ayatinene.sonycompanion.protocol.*
 import io.github.ayatinene.sonycompanion.network.*
+import io.github.ayatinene.sonycompanion.pairing.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
@@ -15,6 +16,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 import io.github.ayatinene.sonycompanion.BuildConfig
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.json.*
@@ -57,6 +59,7 @@ class CompanionController(private val context: Context) {
     private var connectionJob: Job? = null
     private var identityJob: Job? = null
     private var queueJob: Job? = null
+    private var oneTouchJob: Job? = null
     private var intervalJob: Job? = null
     private var scanJob: Job? = null
     private var galleryJob: Job? = null
@@ -84,8 +87,8 @@ class CompanionController(private val context: Context) {
     private class DetachedSession(
         val gen: Long, val snapshot: AppState,
         val http: CameraHttp?, val computer: ComputerTransfer?, val smartphone: SmartphoneTransfer?, val remote: RemoteCamera?,
-        val queue: Job?, val identity: Job?, val scan: Job?, val gallery: Job?, val monitoring: List<Job>, val monitoringStop: Job?,
-        val ownConnection: Job?, val attempt: PendingResources, val actions: List<Job>, val effectiveGraceful: Boolean)
+        val queue: Job?, val identity: Job?, val scan: Job?, val gallery: Job?, val oneTouch: Job?, val monitoring: List<Job>, val monitoringStop: Job?,
+        val ownConnection: Job?, val attempt: PendingResources, val pairing: PairingConnection<Network>?, val actions: List<Job>, val effectiveGraceful: Boolean)
     private val backgroundActive = MutableStateFlow(false)
     /** True while any scan or download holds a background lease. The service observes this instead of
      * inferring from scan/transferring, so a pending start is never torn down before it becomes ready. */
@@ -95,7 +98,16 @@ class CompanionController(private val context: Context) {
         backgroundActive.value = active
         if(active) requestBackgroundStart()
     }
+    /** JPEG/PTP previews and thumbnails keep their proven single-request path. */
     private val thumbnailGate = Semaphore(1)
+    /** Only REMOTE avContent thumbnails use two concurrent HTTP reads. */
+    private val remoteThumbnailScheduler = RemoteThumbnailScheduler(parallelism = 2)
+    private val activeRemoteThumbnails = AtomicInteger()
+    /** Across Date navigation, retain successfully decoded REMOTE thumbnails within a 16 MiB budget.
+     * A new camera session starts clean; no directory-wide prefetch is performed. */
+    private val remoteThumbs = object : LruCache<String, Bitmap>(16 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount.coerceAtLeast(1)
+    }
     private var monitoringStop: Job? = null
     private var lastDevice: Device? = null
     private var lastRemote = RemoteState()
@@ -111,6 +123,11 @@ class CompanionController(private val context: Context) {
     private val captureBinding = CaptureGeoBinding()
     private val protocolResponses = Collections.synchronizedMap(linkedMapOf<String,String>())
     private var selectedNetwork: Network? = null
+    private var pairingConnection: PairingConnection<Network>? = null
+    /** Memory-only, owned by the live Wi-Fi request; lets the existing reconnect button re-request it. */
+    private var pairedCredentials: PairingCredentials? = null
+    private var pairedSource = PairingSource.QR
+    internal var pairingBackend: PairingBackend<Network> = AndroidPairingBackend(context)
     private var lastUsbDescription = ""
     private var visible = true
     private val cm = context.getSystemService(ConnectivityManager::class.java)
@@ -133,7 +150,9 @@ class CompanionController(private val context: Context) {
                 log("Wi-Fi 可用 network=$network",LogLevel.DEBUG,"CONNECT")
             }
             override fun onLost(network: Network) {
-                if(network==selectedNetwork) scope.launch {
+                val lostGeneration=identity.currentGeneration
+                if(network==selectedNetwork && pairingConnection==null) scope.launch {
+                    if(identity.currentGeneration!=lostGeneration || network!=selectedNetwork || pairingConnection!=null) return@launch
                     log("相机 Wi-Fi 丢失 network=$network",LogLevel.WARN,"CONNECT")
                     cancelTransfers(); disconnect(false)
                     update { copy(error="相机 Wi-Fi 已断开，请重新连接",message="连接已断开") }
@@ -213,7 +232,7 @@ class CompanionController(private val context: Context) {
         val token=identity.nextScanRun()
         scanJob?.cancel()
         scanJob=scope.launch(Dispatchers.IO) {
-            val lease=background.acquire("scan")
+            val lease=background.acquire("scan",token.generation)
             try {
                 // The service must actually reach startForeground before any PTP listing begins.
                 if(!awaitBackgroundReady()) {
@@ -281,27 +300,35 @@ class CompanionController(private val context: Context) {
         log("取消后台任务 scan=${snapshot.scan.phase} transferring=${snapshot.transferring}",LogLevel.INFO,"FGS")
         // Forced: detachSession closes the transports before cancelling monitoring, so no cleanup RPC
         // is sent, then we join only the detached jobs.
-        val d=detachSession(snapshot,null,gracefulRequested=false)
-        runCatching { d.attempt.abortAll() }
-        val cancelled=snapshot.scan.copy(phase=ScanPhase.Failed,error="已取消",paused=false)
-        val queue=snapshot.queue.map { if(it.state in listOf("等待","传输中")) it.copy(state="已取消") else it }
-        // Clear busy/connecting too: the cancelled connect job's own finally is generation-guarded and
-        // would otherwise skip, leaving the UI stuck busy forever.
-        whenGeneration(d.gen) { update { copy(connected=false,connecting=false,busy=false,transferring=false,scan=cancelled,queue=queue,
-            remote=RemoteState(),intervalRemaining=0,
-            message=if(snapshot.mode==CameraMode.COMPUTER) "已取消，原文件会话已断开，请重新连接" else "已取消后台任务") } }
-        background.reset("cancel")
-        scope.launch(Dispatchers.IO) {
-            withContext(NonCancellable) {
-                runCatching { sessionActions.join(d.actions) }
-                runCatching { d.scan?.join() }
-                runCatching { d.queue?.join() }
-                runCatching { d.identity?.join() }
-                runCatching { d.gallery?.join() }
-                runCatching { d.monitoring.joinAll() }
-                runCatching { d.monitoringStop?.join() }
-                whenGeneration(d.gen) { frameState.value=null }
+        val d=detachSession(snapshot,null,gracefulRequested=false) ?: return
+        try {
+            runCatching { d.attempt.abortAll() }
+            val cancelled=snapshot.scan.copy(phase=ScanPhase.Failed,error="已取消",paused=false)
+            val queue=snapshot.queue.map { if(it.state in listOf("等待","传输中")) it.copy(state="已取消") else it }
+            // Clear busy/connecting too: the cancelled connect job's own finally is generation-guarded and
+            // would otherwise skip, leaving the UI stuck busy forever.
+            whenGeneration(d.gen) { update { copy(connected=false,connecting=false,busy=false,transferring=false,scan=cancelled,queue=queue,
+                remote=RemoteState(),intervalRemaining=0,
+                message=if(snapshot.mode==CameraMode.COMPUTER) "已取消，原文件会话已断开，请重新连接" else "已取消后台任务") } }
+            background.resetOwned(d.gen-1,"cancel")
+            scope.launch(Dispatchers.IO) {
+                withContext(NonCancellable) {
+                    runCatching { sessionActions.join(d.actions) }
+                    runCatching { d.oneTouch?.join() }
+                    runCatching { d.scan?.join() }
+                    runCatching { d.queue?.join() }
+                    runCatching { d.identity?.join() }
+                    runCatching { d.gallery?.join() }
+                    runCatching { d.monitoring.joinAll() }
+                    runCatching { d.monitoringStop?.join() }
+                    whenGeneration(d.gen) { frameState.value=null }
+                }
             }
+        } finally {
+            // A forced cancel owns the detached Wi-Fi request and must release it explicitly: abortAll()
+            // is a no-op once the attempt was promoted, so an already-established pairing would otherwise
+            // leak its ConnectivityManager callback. Idempotent, so a pending attempt is not double-closed.
+            runCatching { d.pairing?.close() }
         }
     }
     fun usbStatus(): String = UsbGuidRegistrar(context).description().also {
@@ -321,12 +348,19 @@ class CompanionController(private val context: Context) {
             log("USB GUID 登记完成，接收端设置已保存",tag="USB")
         } finally { update { copy(busy=false) } }
     }
-    fun connect(mode: CameraMode): Boolean {
+    fun connect(mode: CameraMode): Boolean = connect(mode, if(mode!=CameraMode.COMPUTER && pairingConnection!=null) pairedCredentials else null, pairedSource)
+    fun pairCamera(credentials: PairingCredentials, source: PairingSource = PairingSource.QR): Boolean = connect(CameraMode.REMOTE, credentials, source)
+    fun cancelPairing() { scope.launch { disconnect(false) } }
+    private fun connect(requestedMode: CameraMode, credentials: PairingCredentials?, source: PairingSource): Boolean {
         if(state.value.busy) return false
         if(state.value.transferring) { update { copy(error="请先完成或取消文件传输") }; return false }
         if(connectionJob?.isActive==true) return false
         connectionJob = scope.launch {
+            var mode = requestedMode
+            val nfcAuto = credentials!=null && source==PairingSource.NFC
             var gen = identity.currentGeneration
+            var sharing: Pair<SmartphoneTransfer,List<CameraFile>>? = null
+            var shareLease: BackgroundOwnership.Lease? = null
             try {
                 disconnect()
                 gen = identity.currentGeneration
@@ -334,14 +368,33 @@ class CompanionController(private val context: Context) {
                 pendingConnection = attempt
                 var remoteAttempt: RemoteCamera? = null
                 var smartphoneAttempt: SmartphoneTransfer? = null
-                update { copy(connecting=true,mode=mode,busy=true,message="查找相机…",error=null,files=emptyList(),remote=RemoteState(),scan=ScanState()) }
-                log("开始连接 mode=$mode",tag="CONNECT")
+                update { copy(connecting=true,mode=mode,busy=true,message="查找相机…",error=null,files=emptyList(),folder="",galleryPath=emptyList(),remote=RemoteState(),scan=ScanState()) }
+                log("开始连接 mode=$mode source=${if(credentials==null) "MANUAL" else source.name}",tag="CONNECT")
                 try {
                     // Test seam: a local transport + device list lets lifecycle tests drive a real
                     // controller against a local server without a camera or Wi-Fi.
                     val testOverride=sessionOverride
                     val networks = CameraNetwork(context)
-                    val network = if(testOverride==null) networks.wifi() else null; selectedNetwork=network
+                    val network = if(credentials!=null) {
+                        log("请求相机 Wi-Fi source=${source.name}",tag="PAIRING")
+                        update { copy(message="等待 Android 确认连接相机 Wi-Fi…") }
+                        val pairGen=gen
+                        lateinit var lease: PairingConnection<Network>
+                        lease=PairingConnection(pairingBackend) { _ -> scope.launch pairedLoss@{
+                            if(identity.currentGeneration!=pairGen || pairingConnection!==lease) return@pairedLoss
+                            disconnect(false)
+                            if(identity.currentGeneration==pairGen+1) update { copy(error="相机 Wi-Fi 已断开，请重新配对",message="连接已断开") }
+                        } }
+                        pairingConnection=lease; pairedCredentials=credentials; pairedSource=source
+                        attempt.register { lease.close() }
+                        lease.await(credentials).also {
+                            currentCoroutineContext().ensureActive()
+                            check(identity.currentGeneration==gen && !lease.isClosed) { "配对已取消" }
+                            log("相机 Wi-Fi 已可用 source=${source.name} network=$it",tag="PAIRING")
+                            update { copy(message=if(nfcAuto) "Wi-Fi 已连接，正在识别相机遥控或传图服务…" else "Wi-Fi 已连接，正在查找相机遥控服务…") }
+                        }
+                    } else if(testOverride==null) networks.wifi() else null
+                    selectedNetwork=network
                     log("绑定 Wi-Fi network=$network",LogLevel.DEBUG,"CONNECT")
                     val transport = testOverride?.transport ?: CameraHttp(network,trace={ label,response ->
                         synchronized(protocolResponses) {
@@ -396,13 +449,25 @@ class CompanionController(private val context: Context) {
                         startScan()
                     } else {
                         val devices = testOverride?.devices
-                            ?: networks.discover(network!!,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
+                            ?: if(credentials!=null) {
+                                withTimeoutOrNull(20_000) {
+                                    discoverPairedCamera { networks.discover(network!!,transport,mode==CameraMode.REMOTE,"",pairingAuto=nfcAuto) }
+                                } ?: throw IOException(if(nfcAuto) "Wi-Fi 已连接，但识别相机服务超时，请检查相机模式" else "Wi-Fi 已连接，但查找遥控服务超时，请确认相机已打开智能遥控")
+                            } else networks.discover(network!!,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
                         if(identity.currentGeneration!=gen) { attempt.abortAll(); return@launch }
-                        require(devices.size==1) {
-                            if(devices.isEmpty()) "没有发现相机。请确认相机工作模式、Wi-Fi 和附近设备权限，或在设置填写描述文件 URL。"
+                        val selected = if(nfcAuto) selectNfcService(devices) else null
+                        val candidates = selected?.let { listOf(it.device) } ?: devices
+                        if(selected!=null) {
+                            mode=selected.mode
+                            whenGeneration(gen) { update { copy(mode=mode,message="已识别相机服务：${mode.title}") } }
+                            log("NFC 服务识别 mode=${mode.name}",tag="PAIRING")
+                        }
+                        require(candidates.size==1) {
+                            if(devices.isEmpty() && credentials!=null) "Wi-Fi 已连接，但未发现遥控服务，请确认相机已打开智能遥控。"
+                            else if(devices.isEmpty()) "没有发现相机。请确认相机工作模式、Wi-Fi 和附近设备权限，或在设置填写描述文件 URL。"
                             else "发现多个相机，请在设置填写目标相机的描述文件 URL"
                         }
-                        val device=devices.single(); log("发现 ${device.model} ${device.description} remote=${device.remote} content=${device.content} push=${device.push}",tag="CONNECT")
+                        val device=candidates.single(); log("发现 ${device.model} ${device.description} remote=${device.remote} content=${device.content} push=${device.push}",tag="CONNECT")
                         val scope=if(mode==CameraMode.REMOTE) avContentQueueScope(device) else queueScope(device,mode)
                         attachQueue(device,mode,gen,scope)
                         if(identity.currentGeneration!=gen) { attempt.abortAll(); return@launch }
@@ -438,9 +503,16 @@ class CompanionController(private val context: Context) {
                             val transfer=SmartphoneTransfer(device,transport) { log(it,LogLevel.WARN,"BROWSE") }
                             smartphoneAttempt=transfer
                             if(whenGeneration(gen) { smartphone=transfer; true } != true) { attempt.abortAll(); return@launch }
-                            val files=transfer.initialize()
+                            val autoShare=nfcAuto && device.push!=null
+                            val files=if(autoShare) {
+                                shareLease=background.acquire("nfc-share",gen)
+                                whenGeneration(gen) { update { copy(oneTouchImport=true,message="正在读取相机共享照片 · 最大可用 JPEG…") } }
+                                check(awaitBackgroundReady()) { "后台服务不可用，无法开始一触分享导入" }
+                                withTimeoutOrNull(60_000) { transfer.initialize(oneTouch=true) }
+                                    ?: throw IOException("读取相机共享内容超时")
+                            } else transfer.initialize()
                             val published=whenGeneration(gen) {
-                                update { copy(connected=true,files=files,folder=transfer.rootId,message="已连接 · JPEG 传输") }
+                                update { copy(connected=true,files=files,folder=transfer.rootId,galleryPath=emptyList(),message="已连接 · JPEG 传输") }
                                 attempt.release()
                                 true
                             }
@@ -451,14 +523,35 @@ class CompanionController(private val context: Context) {
                                 return@launch
                             }
                             log("JPEG 连接成功 root=${transfer.rootId} entries=${files.size}",tag="CONNECT")
+                            if(autoShare) sharing=transfer to files
+                            else if(nfcAuto) whenGeneration(gen) { update { copy(message="相机未提供分享服务，请在图库手动选择下载") } }
                         }
                         loadIdentity(device,transport)
                     }
                 } catch(e: CancellationException) {
-                    // Cancelled mid-initialization: abort this attempt's own transport to unblock the
-                    // blocking call before the caller joins.
-                    withContext(NonCancellable+Dispatchers.IO) { attempt.abortAll() }
-                    whenGeneration(gen) { computer=null; http=null; smartphone=null; remote=null }
+                    // A user-cancelled share still owns its Wi-Fi/HTTP during preparation. Cancel the
+                    // pending read first, then end the started share before releasing that transport.
+                    // A forced detach has already changed generation and must never send cleanup RPCs.
+                    val cancelledShare=identity.currentGeneration==gen && nfcAuto && state.value.oneTouchImport
+                    if(cancelledShare) whenGeneration(gen) { update { copy(message="正在结束一触分享…") } }
+                    withContext(NonCancellable) {
+                        withContext(Dispatchers.IO) {
+                            if(cancelledShare) {
+                                smartphoneAttempt?.setOneTouchResult(OneTouchResult.Cancelled)
+                                runCatching { withTimeout(INIT_FINISH_TIMEOUT_MILLIS) { smartphoneAttempt?.finish() } }
+                                    .onFailure { log("取消准备后结束一触分享：${it.message}",LogLevel.WARN,"SHARE",it) }
+                            }
+                            attempt.abortAll()
+                        }
+                        // Publish on the owning dispatcher before returning to the cancelled context.
+                        whenGeneration(gen) {
+                            computer=null; http=null; smartphone=null; remote=null
+                            if(cancelledShare) {
+                                pairingConnection?.close(); pairingConnection=null; pairedCredentials=null; selectedNetwork=null
+                                update { copy(connected=false,oneTouchImport=false,device=null,error=null,message="一触分享已取消") }
+                            }
+                        }
+                    }
                     throw e
                 }
                 catch(e: Exception) {
@@ -469,7 +562,7 @@ class CompanionController(private val context: Context) {
                     val owns=identity.currentGeneration==gen
                     withContext(NonCancellable+Dispatchers.IO) {
                         if(owns) {
-                            runCatching { withTimeout(INIT_FINISH_TIMEOUT_MILLIS) { remoteAttempt?.finish(); smartphoneAttempt?.finish() } }
+                            runCatching { withTimeout(INIT_FINISH_TIMEOUT_MILLIS) { remoteAttempt?.finish(); smartphoneAttempt?.finish(error=nfcAuto) } }
                                 .onFailure { log("初始化失败后结束会话：${it.message}",LogLevel.WARN,"CONNECT",it) }
                         }
                         attempt.abortAll()
@@ -477,14 +570,125 @@ class CompanionController(private val context: Context) {
                     // Never let a superseded connect overwrite a newer session's state.
                     whenGeneration(gen) {
                         computer=null; http=null; smartphone=null; remote=null
-                        update { copy(connected=false,error=e.message,message="连接失败",scan=ScanState()) }
+                        pairingConnection?.close(); pairingConnection=null; pairedCredentials=null; selectedNetwork=null
+                        update { copy(connected=false,oneTouchImport=false,error=e.message,message="连接失败",scan=ScanState()) }
                     }
                 }
             } finally {
                 whenGeneration(gen) { update { copy(connecting=false,busy=false) } }
+                if(sharing==null) shareLease?.release()
             }
+            sharing?.let { (camera,files) -> startOneTouchImport(gen,camera,files,requireNotNull(shareLease)) }
         }
         return true
+    }
+    /** NFC share uses the real queue and PhotoStore; this coordinator only selects this batch,
+     * reports camera-side progress, and schedules a generation-checked session end. It never calls
+     * disconnect from its own job (disconnect cancels/joins the job captured in DetachedSession). */
+    private fun startOneTouchImport(gen: Long, camera: SmartphoneTransfer, initial: List<CameraFile>, lease: BackgroundOwnership.Lease) {
+        if(whenGeneration(gen) { connectedTo(camera) }!=true) { lease.release();return }
+        lateinit var job: Job
+        job=scope.launch(start=CoroutineStart.LAZY) {
+            var download: Job? = null
+            var result=OneTouchResult.Failure
+            var summary="一触分享导入失败"
+            var failure: String? = null
+            try {
+                whenGeneration(gen) { update { copy(oneTouchImport=true,busy=true,message="正在读取相机共享照片 · 最大可用 JPEG…") } }
+                check(awaitBackgroundReady()) { "后台服务不可用，无法开始一触分享导入" }
+                val device=whenGeneration(gen) { state.value.device.takeIf { connectedTo(camera) } } ?: return@launch
+                val selected=withTimeout(60_000) { selectedSharedJpegs(initial,device.description) { camera.browse(it,4000) } }
+                currentCoroutineContext().ensureActive()
+                val ids=selected.map { it.id }.toSet()
+                if(whenGeneration(gen) { connectedTo(camera) }!=true) return@launch
+                require(state.value.queue.count { it.file.id !in ids }+selected.size<=2000) {
+                    "下载队列记录已接近上限，请先在相机图库清理队列记录后重新触碰 NFC"
+                }
+                camera.beginOneTouchCopy()
+                camera.oneTouchProgress(selected.size,0)
+                // Recovered work is retained for explicit retry, never included in the NFC batch.
+                whenGeneration(gen) { update { copy(queue=queue.map {
+                    if(it.state in setOf("等待","传输中")) it.copy(state="待恢复",received=0) else it
+                },queueNotice="仅导入本次相机共享的照片",message="正在自动导入 ${selected.size} 张共享照片 · 最大可用 JPEG") } }
+                download=whenGeneration(gen) {
+                    if(!connectedTo(camera)) null else {
+                        enqueueFiles(selected,gen,emptyMap(),true)
+                        queueJob
+                    }
+                }
+                val activeDownload=download ?: return@launch
+                coroutineScope {
+                    val progress=launch {
+                        state.map { snapshot -> snapshot.queue.count { it.file.id in ids && it.state in setOf("完成","已存在","失败") } }
+                            .distinctUntilChanged().collect { count -> if(count>0) camera.oneTouchProgress(selected.size,count) }
+                    }
+                    try { activeDownload.join() } finally { progress.cancelAndJoin() }
+                }
+                currentCoroutineContext().ensureActive()
+                val batch=whenGeneration(gen) {
+                    state.value.queue.filter { it.file.id in ids }.takeIf { connectedTo(camera) }
+                } ?: return@launch
+                result=oneTouchOutcome(batch,ids)
+                camera.oneTouchProgress(selected.size,batch.count { it.state in setOf("完成","已存在","失败") })
+                val imported=batch.count { it.state=="完成" }
+                val existing=batch.count { it.state=="已存在" }
+                val failed=batch.count { it.state=="失败" }
+                summary=when(result) {
+                    OneTouchResult.Success -> "一触分享完成 · 已导入 $imported 张，已存在 $existing 张"
+                    OneTouchResult.PartialFailure -> "一触分享部分完成 · 已导入 $imported 张，已存在 $existing 张，失败 $failed 张"
+                    OneTouchResult.Failure -> "一触分享失败 · $failed 张未能导入"
+                    OneTouchResult.Cancelled -> "一触分享已取消 · 已导入 $imported 张，已存在 $existing 张"
+                }
+                if(result in setOf(OneTouchResult.Failure,OneTouchResult.PartialFailure)) failure=summary
+                log("一触分享结果 result=$result imported=$imported existing=$existing failed=$failed",tag="SHARE")
+            } catch(e: TimeoutCancellationException) {
+                result=OneTouchResult.Failure;failure="读取相机共享照片超时";summary="一触分享导入失败"
+                log(failure.orEmpty(),LogLevel.WARN,"SHARE")
+            } catch(e: CancellationException) {
+                result=OneTouchResult.Cancelled;summary="一触分享已取消，已保存的照片保留"
+                throw e
+            } catch(e: Exception) {
+                result=OneTouchResult.Failure;failure=e.message ?: "无法读取或导入相机共享照片"
+                log("一触分享失败：$failure",LogLevel.ERROR,"SHARE",e)
+            } finally {
+                // Capture the queue job, never read a newer session's global queue across suspension.
+                withContext(NonCancellable) { download?.cancelAndJoin() }
+                var ending=false
+                whenGeneration(gen) {
+                    if(connectedTo(camera) && oneTouchJob===job) {
+                        ending=true
+                        camera.setOneTouchResult(result)
+                        update { copy(message="正在结束一触分享…") }
+                        // Dispatch on the next main-loop turn, after this job's finally has returned.
+                        scope.launch(Dispatchers.Main) endShare@{
+                            try {
+                                if(whenGeneration(gen) { connectedTo(camera) && oneTouchJob===job }!=true) return@endShare
+                                if(disconnectOwned(true,false,gen)) {
+                                    whenGeneration(gen+1) { update { copy(message=summary,error=failure) } }
+                                }
+                            } catch(e: CancellationException) { throw e }
+                            catch(e: Exception) {
+                                log("结束一触分享失败：${e.message}",LogLevel.ERROR,"SHARE",e)
+                                whenGeneration(gen+1) { update { copy(busy=false,oneTouchImport=false,error="结束一触分享时发生错误，请检查诊断日志") } }
+                            } finally { lease.release() }
+                        }
+                    }
+                }
+                if(!ending) lease.release()
+            }
+        }
+        val published=whenGeneration(gen) {
+            if(!connectedTo(camera)) false else { oneTouchJob=job;true }
+        }==true
+        if(published) { if(!job.start()) lease.release() } else { job.cancel();lease.release() }
+    }
+    private fun connectedTo(camera: SmartphoneTransfer): Boolean = state.value.connected && smartphone===camera
+    fun cancelOneTouchImport() {
+        val snapshot=state.value
+        if(!snapshot.oneTouchImport || (!snapshot.connected && !snapshot.connecting)) return
+        log("用户取消一触分享导入",tag="SHARE")
+        val job=oneTouchJob
+        if(job!=null) job.cancel() else connectionJob?.cancel()
     }
     /**
      * Reads and publishes the saved queue for [gen] atomically: a superseded attempt must not publish
@@ -652,11 +856,13 @@ class CompanionController(private val context: Context) {
      * the monitoring jobs, and marks the remote so a live-view finally cannot send a cleanup RPC.
      * `effectiveGraceful` is false whenever a control action is still in flight (a cancelled capture
      * does not mean the camera stopped, so no record-mode cleanup is sent). */
-    private fun detachSession(snapshot: AppState, self: Job?, gracefulRequested: Boolean): DetachedSession {
+    private fun detachSession(snapshot: AppState, self: Job?, gracefulRequested: Boolean, expectedGeneration: Long? = null): DetachedSession? {
         val detached = identity.locked {
+            if(expectedGeneration!=null && identity.currentGeneration!=expectedGeneration) return@locked null
             val gen=nextGeneration()
             val actions=sessionActions.detach()
             val oldHttp=http; val oldComputer=computer; val oldSmartphone=smartphone; val oldRemote=remote
+            val oldShare=oneTouchJob;oneTouchJob=null
             val oldQueue=queueJob; val oldIdentity=identityJob; val oldScan=scanJob; val oldGallery=galleryJob
             val monitoring=listOfNotNull(liveJob,eventJob,intervalJob)
             liveJob=null; eventJob=null; intervalJob=null
@@ -664,19 +870,24 @@ class CompanionController(private val context: Context) {
             val monitoringStopJob=monitoringStop
             val ownConnection=connectionJob?.takeIf { it.isActive && it!==self }
             val attempt=pendingConnection; pendingConnection=PendingResources()
-            val graceful=gracefulRequested && actions.isEmpty()
+            val pairing=pairingConnection; pairingConnection=null; pairedCredentials=null
+            // A sharing session has no shutter RPC to protect. Incidental local/UI actions must not
+            // suppress its X_TransferEnd; they are cancelled and joined before the end sequence.
+            val graceful=gracefulRequested && (actions.isEmpty() || (snapshot.oneTouchImport && oldRemote==null))
             if(!graceful) oldRemote?.disallowCleanup()
             userScanPaused=false
             computer=null; remote=null; smartphone=null; http=null; selectedNetwork=null
             avContent=null; avContentSource=null; galleryPager=null; avContentEndpoint=null
             captureBinding.clear()
-            update { copy(connected=false,connecting=false,busy=false,transferring=false,scan=ScanState()) }
-            DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,oldGallery,monitoring,monitoringStopJob,ownConnection,attempt,actions,graceful)
-        }
+            val endingShare=graceful && snapshot.oneTouchImport && oldSmartphone!=null
+            update { copy(connected=false,connecting=false,busy=endingShare,transferring=false,oneTouchImport=endingShare,folder="",galleryPath=emptyList(),scan=ScanState()) }
+            DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,oldGallery,oldShare,monitoring,monitoringStopJob,ownConnection,attempt,pairing,actions,graceful)
+        } ?: return null
         if(!detached.effectiveGraceful) {
             runCatching { detached.computer?.abort() }
             runCatching { detached.http?.close() }
         }
+        detached.oneTouch?.takeIf { it!==self }?.cancel()
         detached.actions.forEach { it.cancel() }
         detached.scan?.cancel()
         detached.queue?.cancel()
@@ -687,12 +898,20 @@ class CompanionController(private val context: Context) {
         return detached
     }
     suspend fun disconnect(finish: Boolean = true, allowSonySleep: Boolean = false) {
+        disconnectOwned(finish,allowSonySleep,null)
+    }
+    /** A stale automatic completion must test its generation in the same lock as detachment. */
+    private suspend fun disconnectOwned(finish: Boolean, allowSonySleep: Boolean, expectedGeneration: Long?): Boolean {
         val snapshot=state.value
         log("断开开始 finish=$finish allowSonySleep=$allowSonySleep connected=${snapshot.connected}",LogLevel.DEBUG,"CONNECT")
         val self=coroutineContext[Job]
-        val d=detachSession(snapshot,self,gracefulRequested=finish)
+        val d=detachSession(snapshot,self,gracefulRequested=finish,expectedGeneration=expectedGeneration) ?: return false
+        try {
         runCatching { d.attempt.abortAll() }
-        background.reset("disconnect")
+        // A forced detach releases this session's background leases immediately. A graceful end keeps
+        // them until the X_TransferEnd notification and Wi-Fi release below have completed, so a
+        // backgrounded Activity cannot lose the foreground service and its wake lock mid-notification.
+        if(!d.effectiveGraceful) background.resetOwned(d.gen-1,"disconnect")
         if(snapshot.device!=null) { lastDevice=snapshot.device; lastRemote=snapshot.remote; lastMode=snapshot.mode }
         if(d.ownConnection!=null) {
             runCatching { d.http?.close() }
@@ -707,6 +926,7 @@ class CompanionController(private val context: Context) {
         // released by cancellation, so these joins are bounded and no live-view finally can race the
         // end sequence below.
         sessionActions.join(d.actions,self)
+        d.oneTouch?.takeIf { it!==self }?.join()
         d.identity?.join()
         // A gallery switch can be blocked in an HTTP RPC; bound the join so a graceful disconnect can
         // never hang on it (the transport is closed later in the end sequence).
@@ -732,12 +952,21 @@ class CompanionController(private val context: Context) {
         d.scan?.join()
         d.queue?.join()
         d.http?.close()
-        whenGeneration(d.gen) { thumbs.evictAll(); importedUrls.clear() }
-        whenGeneration(d.gen) { update { copy(connected=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") } }
+        whenGeneration(d.gen) { thumbs.evictAll(); remoteThumbs.evictAll(); importedUrls.clear() }
+        whenGeneration(d.gen) { update { copy(connected=false,busy=false,oneTouchImport=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") } }
         log("断开完成",LogLevel.DEBUG,"CONNECT")
+        } finally {
+            d.pairing?.close()
+            // Safety net for the graceful path: end sequence and Wi-Fi release are done, so any lease
+            // this session still owned (the sharing lease included) can be released now. A forced detach
+            // already released them above and must not be released twice.
+            if(d.effectiveGraceful) background.resetOwned(d.gen-1,"disconnect")
+        }
+        return true
     }
     fun endSession() {
-        if(state.value.transferring) return
+        val snapshot=state.value
+        if(snapshot.transferring || (snapshot.oneTouchImport && !snapshot.connected && !snapshot.connecting)) return
         // A plain (untracked) job: disconnect must never cancel/join itself.
         scope.launch {
             try { disconnect(allowSonySleep=true) } catch(e: CancellationException) { throw e }
@@ -923,9 +1152,14 @@ class CompanionController(private val context: Context) {
             } else false
         }
         if(!latched) return
-        galleryJob?.cancel()
+        val previousGalleryJob=galleryJob
+        previousGalleryJob?.cancel()
         galleryJob=scope.launch {
-            try { switchToGallery(camera,endpoint,gen,retry) }
+            try {
+                // The prior HTTP read must be finished before another function switch starts.
+                withTimeout(GALLERY_SWITCH_TIMEOUT_MILLIS) { previousGalleryJob?.join() }
+                switchToGallery(camera,endpoint,gen,retry)
+            }
             catch(e: CancellationException) { throw e }
             catch(e: Exception) {
                 log("进入相机图库失败：${e.message}",LogLevel.ERROR,"GALLERY",e)
@@ -955,22 +1189,23 @@ class CompanionController(private val context: Context) {
         val av=AvContentTransfer(endpoint,requireNotNull(http)) { message -> log(message,LogLevel.DEBUG,"AVCONTENT") }
         val source=openGallerySource(av)
         if(!ownsCamera(camera,gen)) return
-        val total=bestEffortValue { retryNotAvailableNow { av.count(source) } }?.takeIf { it>=0 }
+        val total=bestEffortValue { retryNotAvailableNow { av.count(source,AvContentTransfer.VIEW_DATE) } }?.takeIf { it>=0 }
         val pager=GalleryPager(AvContentTransfer.DEFAULT_PAGE_SIZE)
         pager.begin(source,total)
-        val page=retryNotAvailableNow { av.getContentPage(source,0,pager.pageSize) }
+        val page=retryNotAvailableNow { av.getContentPage(source,0,pager.pageSize,view=AvContentTransfer.VIEW_DATE) }
         val fresh=pager.accept(page)
         val files=fresh.flatMap { it.toCameraFiles() }
         whenGeneration(gen) {
             if(remote!==camera) return@whenGeneration
             avContent=av; avContentSource=source; galleryPager=pager
-            update { copy(files=files, message="相机图库 · ${pager.contentLoaded} 项",
+            update { copy(files=files,folder=source,galleryPath=emptyList(), message="相机图库 · ${pager.contentLoaded} 项",
                 remote=remote.copy(galleryActive=true, remoteSwitching=false, loadingMore=false, loadMoreFailed=false,
                     hasMoreFiles=pager.hasMore, totalFiles=pager.total, loadedContentCount=pager.contentLoaded,
                     remoteFunction=RemoteFunction.CONTENTS_TRANSFER, switchTarget="")) }
         }
         log("相机图库已就绪 source=$source total=$total loaded=${pager.contentLoaded} more=${pager.hasMore}",tag="GALLERY")
         refreshGalleryQueue(gen,camera)
+        loadRemainingRemotePages(camera,av,pager,gen)
     }
     private suspend fun openGallerySource(av: AvContentTransfer): String {
         val schemes=bestEffortValue { retryNotAvailableNow { av.schemes() } }.orEmpty()
@@ -1045,39 +1280,75 @@ class CompanionController(private val context: Context) {
         }
         return false
     }
-    /** Loads the next avContent page for the current source and appends it in camera (descending) order. */
+    /**
+     * Automatically load the current root/date directory in bounded 20-item requests.
+     * The first page has already been published. A new directory or capture return cancels
+     * galleryJob; old workers must never overwrite the new view or its loading state.
+     */
+    private suspend fun loadRemainingRemotePages(
+        camera: RemoteCamera, av: AvContentTransfer, pager: GalleryPager, gen: Long
+    ) {
+        val source=pager.source ?: return
+        val worker=coroutineContext[Job]
+        if(!pager.hasMore) return
+        whenGeneration(gen) {
+            if(remote===camera && avContent===av && galleryPager===pager && galleryJob===worker)
+                update { copy(remote=remote.copy(loadingMore=true,loadMoreFailed=false)) }
+        }
+        try {
+            while(pager.hasMore && ownsCamera(camera,gen) && galleryJob===worker &&
+                avContent===av && galleryPager===pager) {
+                val page=retryNotAvailableNow {
+                    av.getContentPage(source,pager.nextStart,pager.pageSize,view=AvContentTransfer.VIEW_DATE)
+                }
+                val fresh=pager.accept(page)
+                val files=fresh.flatMap { it.toCameraFiles() }
+                whenGeneration(gen) {
+                    if(remote===camera && avContent===av && galleryPager===pager && galleryJob===worker)
+                        update { copy(files=this.files+files,
+                            remote=remote.copy(loadingMore=pager.hasMore,loadMoreFailed=false,
+                                hasMoreFiles=pager.hasMore,totalFiles=pager.total,
+                                loadedContentCount=pager.contentLoaded)) }
+                }
+                refreshGalleryQueue(gen,camera)
+            }
+        } catch(e: CancellationException) { throw e }
+        catch(e: Exception) {
+            log("自动加载相机目录失败：${e.message}",LogLevel.ERROR,"GALLERY",e)
+            whenGeneration(gen) {
+                if(remote===camera && avContent===av && galleryPager===pager && galleryJob===worker)
+                    update { copy(remote=remote.copy(loadingMore=false,loadMoreFailed=true),
+                        error="加载更多失败，请重试。") }
+            }
+        } finally {
+            withContext(NonCancellable) {
+                whenGeneration(gen) {
+                    if(remote===camera && avContent===av && galleryPager===pager && galleryJob===worker)
+                        update { copy(remote=remote.copy(loadingMore=false)) }
+                }
+            }
+        }
+    }
+
+    /** Only a failed automatic page can be retried manually. */
     fun loadMoreRemoteFiles() {
         val snapshot=state.value
         val camera=remote ?: return
         val av=avContent ?: return
         val pager=galleryPager ?: return
-        val source=pager.source ?: return
-        if(snapshot.mode!=CameraMode.REMOTE || !snapshot.connected) return
-        if(!snapshot.remote.galleryActive || snapshot.remote.remoteSwitching) return
-        if(snapshot.remote.loadingMore || !pager.hasMore) return
-        if(snapshot.transferring) { update { copy(message="下载进行中，暂不加载更多") }; return }
+        if(snapshot.mode!=CameraMode.REMOTE || !snapshot.connected || !snapshot.remote.galleryActive ||
+            snapshot.remote.remoteSwitching || snapshot.remote.loadingMore || !snapshot.remote.loadMoreFailed ||
+            !pager.hasMore || snapshot.transferring) return
         val gen=snapshot.sessionGeneration
         val latched=identity.locked {
-            if(identity.currentGeneration==gen && remote===camera && avContent===av) { update { copy(remote=remote.copy(loadingMore=true, loadMoreFailed=false)) }; true } else false
+            if(identity.currentGeneration==gen && remote===camera && avContent===av && galleryPager===pager) {
+                update { copy(remote=remote.copy(loadingMore=true,loadMoreFailed=false),error=null) }
+                true
+            } else false
         }
         if(!latched) return
-        galleryJob=scope.launch {
-            try {
-                val page=retryNotAvailableNow { av.getContentPage(source,pager.nextStart,pager.pageSize) }
-                val fresh=pager.accept(page)
-                val files=fresh.flatMap { it.toCameraFiles() }
-                whenGeneration(gen) {
-                    if(remote!==camera) return@whenGeneration
-                    update { copy(files=this.files+files, remote=remote.copy(loadingMore=false, loadMoreFailed=false,
-                        hasMoreFiles=pager.hasMore, totalFiles=pager.total, loadedContentCount=pager.contentLoaded)) }
-                }
-                refreshGalleryQueue(gen,camera)
-            } catch(e: CancellationException) { throw e }
-            catch(e: Exception) {
-                log("加载更多失败：${e.message}",LogLevel.ERROR,"GALLERY",e)
-                whenGeneration(gen) { if(remote===camera) update { copy(remote=remote.copy(loadingMore=false, loadMoreFailed=true), error="加载更多失败，请重试。") } }
-            }
-        }
+        galleryJob?.cancel()
+        galleryJob=scope.launch { loadRemainingRemotePages(camera,av,pager,gen) }
     }
     /** Unified refresh entry: reloads the remote gallery page, a JPEG folder, or the RAW scan. A gallery
      * whose entry failed (galleryActive but no client yet) is retried through the same open path. */
@@ -1100,22 +1371,23 @@ class CompanionController(private val context: Context) {
         if(snapshot.remote.loadingMore || snapshot.remote.remoteSwitching || snapshot.transferring) return
         val gen=snapshot.sessionGeneration
         val latched=identity.locked {
-            if(identity.currentGeneration==gen && remote===camera && avContent===av) { update { copy(remote=remote.copy(loadingMore=true)) }; true } else false
+            if(identity.currentGeneration==gen && remote===camera && avContent===av) { update { copy(remote=remote.copy(loadingMore=true,loadMoreFailed=false),error=null) }; true } else false
         }
         if(!latched) return
         galleryJob=scope.launch {
             try {
-                val total=bestEffortValue { retryNotAvailableNow { av.count(source) } }?.takeIf { it>=0 }
+                val total=bestEffortValue { retryNotAvailableNow { av.count(source,AvContentTransfer.VIEW_DATE) } }?.takeIf { it>=0 }
                 pager.begin(source,total)
-                val page=retryNotAvailableNow { av.getContentPage(source,0,pager.pageSize) }
+                val page=retryNotAvailableNow { av.getContentPage(source,0,pager.pageSize,view=AvContentTransfer.VIEW_DATE) }
                 val fresh=pager.accept(page)
                 val files=fresh.flatMap { it.toCameraFiles() }
                 whenGeneration(gen) {
                     if(remote!==camera) return@whenGeneration
-                    update { copy(files=files, message="相机图库 · ${pager.contentLoaded} 项",
+                    update { copy(files=files, message="相机图库 · ${pager.contentLoaded} 项", error=null,
                         remote=remote.copy(loadingMore=false, loadMoreFailed=false, hasMoreFiles=pager.hasMore, totalFiles=pager.total, loadedContentCount=pager.contentLoaded)) }
                 }
                 refreshGalleryQueue(gen,camera)
+                loadRemainingRemotePages(camera,av,pager,gen)
             } catch(e: CancellationException) { throw e }
             catch(e: Exception) {
                 log("刷新相机图库失败：${e.message}",LogLevel.ERROR,"GALLERY",e)
@@ -1143,9 +1415,13 @@ class CompanionController(private val context: Context) {
             } else false
         }
         if(!latched) return
-        galleryJob?.cancel()
+        val previousGalleryJob=galleryJob
+        previousGalleryJob?.cancel()
         galleryJob=scope.launch {
             try {
+                // Automatic pagination can still be reading the storage service. Never
+                // switch to Remote Shooting until its request has actually finished.
+                withTimeout(GALLERY_SWITCH_TIMEOUT_MILLIS) { previousGalleryJob?.join() }
                 val job=queueJob
                 if(job!=null && job.isActive) withTimeoutOrNull(GALLERY_SWITCH_TIMEOUT_MILLIS) { job.join() }
                 if(state.value.transferring) throw IllegalStateException("下载仍在进行，已取消返回拍摄")
@@ -1158,7 +1434,7 @@ class CompanionController(private val context: Context) {
                 if(!ownsCamera(camera,gen)) return@launch
                 confirmShootingReady(camera,gen)
                 if(!ownsCamera(camera,gen)) return@launch
-                whenGeneration(gen) { if(remote===camera) update { copy(files=emptyList(), message="已返回拍摄模式",
+                whenGeneration(gen) { if(remote===camera) update { copy(files=emptyList(),folder="",galleryPath=emptyList(), message="已返回拍摄模式",
                     remote=remote.copy(galleryActive=false, remoteSwitching=false, hasMoreFiles=false, loadingMore=false,
                         totalFiles=null, loadedContentCount=0, remoteFunction=RemoteFunction.REMOTE_SHOOTING, switchTarget="")) } }
                 startMonitoring()
@@ -1200,34 +1476,119 @@ class CompanionController(private val context: Context) {
         // pages are still available an unmatched entry may simply live on a page not loaded yet, so it
         // stays resumable instead of being wrongly downgraded to "需重新选择".
         val listingComplete=!snapshot.remote.hasMoreFiles
+        val currentDate=snapshot.folder.takeIf { it.isNotBlank() && it!=avContentSource }
         val updated=snapshot.queue.map { item ->
             if(item.file.original && item.state in setOf("待恢复","失败","已取消","需重新选择")) {
                 val fresh=refreshQueuedFile(item.file,files)
                 when {
                     fresh!=null -> item.copy(file=fresh,state="待恢复",error=null)
-                    listingComplete -> item.copy(state="需重新选择",error="无法确认该文件，请重新选择后再下载。")
+                    // A date-root listing contains no originals and cannot prove a queue entry missing.
+                    listingComplete && currentDate!=null && item.file.id.startsWith("$currentDate#") ->
+                        item.copy(state="需重新选择",error="无法确认该文件，请重新选择后再下载。")
                     else -> item
                 }
             } else item
         }
         if(updated!=snapshot.queue) whenGeneration(gen) { if(remote===camera) update { copy(queue=updated) } }
     }
-    fun browse(id: String) {
-        val gen=state.value.sessionGeneration
+    private enum class JpegNavigation { Enter, Up, Root }
+
+    private fun browseJpeg(id: String, navigation: JpegNavigation) {
+        val snapshot=state.value
+        if(!snapshot.connected || snapshot.mode!=CameraMode.JPEG || snapshot.busy || snapshot.transferring) return
         val camera=smartphone ?: return
+        val gen=snapshot.sessionGeneration
         sessionAction(gen) {
             if(whenGeneration(gen) { smartphone===camera } != true) return@sessionAction
             whenGeneration(gen) { update { copy(busy=true) } }
             try {
                 log("浏览目录 id=$id",LogLevel.DEBUG,"BROWSE")
                 val files=camera.browse(id)
-                whenGeneration(gen) { if(smartphone===camera) update { copy(files=files,folder=id) } }
+                whenGeneration(gen) {
+                    if(smartphone===camera) update {
+                        val history=when(navigation) {
+                            JpegNavigation.Root -> emptyList()
+                            JpegNavigation.Up -> galleryPath.dropLast(1)
+                            JpegNavigation.Enter -> if(folder==id) galleryPath else galleryPath+folder
+                        }
+                        copy(files=files,folder=id,galleryPath=history)
+                    }
+                }
                 log("目录返回 id=$id entries=${files.size}",LogLevel.DEBUG,"BROWSE")
-            }
-            finally { whenGeneration(gen) { update { copy(busy=false) } } }
+            } finally { whenGeneration(gen) { update { copy(busy=false) } } }
         }
     }
-    fun root() { smartphone?.let { browse(it.rootId) } }
+
+    /** Browse only a camera-supplied date URI, never one constructed from a filename. */
+    private fun browseRemoteDate(id: String) {
+        val snapshot=state.value
+        val camera=remote ?: return
+        val av=avContent ?: return
+        val root=avContentSource ?: return
+        if(!snapshot.connected || snapshot.mode!=CameraMode.REMOTE || !snapshot.remote.galleryActive ||
+            snapshot.remote.remoteSwitching || snapshot.busy || snapshot.transferring) return
+        if(id!=root && !(snapshot.folder==root && snapshot.files.any { it.container && it.id==id })) return
+        val gen=snapshot.sessionGeneration
+        val latched=identity.locked {
+            if(identity.currentGeneration==gen && remote===camera && avContent===av) {
+                update { copy(remote=remote.copy(loadingMore=true,loadMoreFailed=false),error=null) }
+                true
+            } else false
+        }
+        if(!latched) return
+        val previousGalleryJob=galleryJob
+        previousGalleryJob?.cancel()
+        galleryJob=scope.launch {
+            // Created before the first read so a failed first page can still be retried for this id.
+            val pager=GalleryPager(AvContentTransfer.DEFAULT_PAGE_SIZE).apply { begin(id,null) }
+            try {
+                // Cancellation alone does not prove a synchronous HTTP read is released.
+                withTimeout(GALLERY_SWITCH_TIMEOUT_MILLIS) { previousGalleryJob?.join() }
+                val total=bestEffortValue { retryNotAvailableNow { av.count(id,AvContentTransfer.VIEW_DATE) } }?.takeIf { it>=0 }
+                pager.begin(id,total)
+                val page=retryNotAvailableNow { av.getContentPage(id,0,pager.pageSize,view=AvContentTransfer.VIEW_DATE) }
+                val files=pager.accept(page).flatMap { it.toCameraFiles() }
+                whenGeneration(gen) {
+                    if(remote!==camera || avContent!==av) return@whenGeneration
+                    galleryPager=pager
+                    update { copy(files=files,folder=id,galleryPath=if(id==root) emptyList() else listOf(root),
+                        remote=remote.copy(loadingMore=false,loadMoreFailed=false,hasMoreFiles=pager.hasMore,
+                            totalFiles=pager.total,loadedContentCount=pager.contentLoaded)) }
+                }
+                refreshGalleryQueue(gen,camera)
+                loadRemainingRemotePages(camera,av,pager,gen)
+            } catch(e: CancellationException) { throw e }
+            catch(e: Exception) {
+                log("读取日期目录失败：${e.message}",LogLevel.ERROR,"GALLERY",e)
+                whenGeneration(gen) { if(remote===camera && avContent===av) {
+                    // Keep this date as the retry target so "重试" reloads it, and enter its error state.
+                    galleryPager=pager
+                    update { copy(files=emptyList(),folder=id,galleryPath=if(id==root) emptyList() else listOf(root),
+                        remote=remote.copy(loadingMore=false,loadMoreFailed=false,hasMoreFiles=false,totalFiles=null,loadedContentCount=0),
+                        error="无法读取相机文件，请重试或返回拍摄。") }
+                } }
+            }
+        }
+    }
+
+    fun browse(id: String) {
+        val snapshot=state.value
+        if(snapshot.mode==CameraMode.REMOTE && snapshot.remote.galleryActive) browseRemoteDate(id)
+        else if(snapshot.mode==CameraMode.JPEG) browseJpeg(id,JpegNavigation.Enter)
+    }
+    fun up() {
+        val snapshot=state.value
+        val parent=snapshot.galleryPath.lastOrNull() ?: return
+        if(snapshot.mode==CameraMode.REMOTE && snapshot.remote.galleryActive) browseRemoteDate(parent)
+        else if(snapshot.mode==CameraMode.JPEG) browseJpeg(parent,JpegNavigation.Up)
+    }
+    fun root() {
+        val snapshot=state.value
+        if(snapshot.mode==CameraMode.REMOTE && snapshot.remote.galleryActive)
+            avContentSource?.let(::browseRemoteDate)
+        else if(snapshot.mode==CameraMode.JPEG)
+            smartphone?.let { browseJpeg(it.rootId,JpegNavigation.Root) }
+    }
     suspend fun cameraPreview(file: CameraFile, expectedScope: String?, expectedGeneration: Long = state.value.sessionGeneration): Bitmap? {
         val snapshot=state.value;val transport=http;val ptp=computer
         return withContext(Dispatchers.IO) { thumbnailGate.withPermit {
@@ -1266,41 +1627,85 @@ class CompanionController(private val context: Context) {
         val current=state.value
         return current.sessionGeneration==gen && current.queueScope==scope && current.connected && computer===ptp && http===transport
     }
-    suspend fun thumbnail(file:CameraFile, expectedScope: String?, expectedGeneration: Long = state.value.sessionGeneration): Bitmap? {
-        val snapshot=state.value;val transport=http;val ptp=computer
-        return withContext(Dispatchers.IO) { thumbnailGate.withPermit {
-        if(!snapshot.connected || !state.value.connected || snapshot.queueScope!=expectedScope || state.value.queueScope!=expectedScope
-            || snapshot.sessionGeneration!=expectedGeneration || state.value.sessionGeneration!=expectedGeneration) return@withContext null
-        val key="${expectedGeneration}:${snapshot.queueScope}:${file.id}:${file.thumbnail}"; thumbs.get(key)?.let { return@withContext it }
-        try {
-            val bytes = if(file.handle!=null) ptp?.thumbnail(file.handle) else {
-                val url=file.thumbnail ?: file.bestResource()?.url ?: return@withContext null
-                transport?.stream(url) { r ->
-                    val source=requireNotNull(r.body).source()
-                    require(!source.request(4L*1024*1024+1)) { "缩略图过大" }; source.readByteArray()
+    suspend fun thumbnail(file:CameraFile, expectedScope: String?, expectedGeneration: Long = state.value.sessionGeneration): Bitmap? =
+        withContext(Dispatchers.IO) {
+            val snapshot=state.value
+            val transport=http
+            val ptp=computer
+            if(!sessionCurrent(expectedGeneration,expectedScope,ptp,transport) ||
+                !snapshot.connected || snapshot.queueScope!=expectedScope ||
+                snapshot.sessionGeneration!=expectedGeneration) return@withContext null
+
+            val isRemoteThumb=snapshot.mode==CameraMode.REMOTE && file.original &&
+                file.protocol==PROTOCOL_HTTP && file.thumbnail!=null
+            // The REMOTE key intentionally uses the camera-supplied URL, not the JPEG/ARW
+            // file ID or current Date folder. Two formats and a later revisit share it.
+            val key=if(isRemoteThumb)
+                "${expectedGeneration}:${expectedScope}:thumbnail:${file.thumbnail}"
+            else "${expectedGeneration}:${expectedScope}:${file.id}:${file.thumbnail}"
+            val cache=if(isRemoteThumb) remoteThumbs else thumbs
+            val queuedAt=System.nanoTime()
+
+            suspend fun fetch(): Bitmap? {
+                // A queued request may resume after a disconnect or after an earlier owner
+                // was cancelled. It must not touch the stale session's HTTP transport.
+                if(!sessionCurrent(expectedGeneration,expectedScope,ptp,transport)) return null
+                val started=System.nanoTime()
+                val concurrent=if(isRemoteThumb) activeRemoteThumbnails.incrementAndGet() else 0
+                if(isRemoteThumb) log("REMOTE 缩略图开始 ${file.name} queue=${(started-queuedAt)/1_000_000}ms active=$concurrent",
+                    LogLevel.DEBUG,"THUMB")
+                try {
+                    val bytes=if(file.handle!=null) ptp?.thumbnail(file.handle) else {
+                        val url=file.thumbnail ?: file.bestResource()?.url ?: return null
+                        transport?.stream(url) { response ->
+                            val input=requireNotNull(response.body).source()
+                            require(!input.request(4L*1024*1024+1)) { "缩略图过大" }
+                            input.readByteArray()
+                        }
+                    } ?: return null
+                    val options=BitmapFactory.Options().apply { inJustDecodeBounds=true }
+                    BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
+                    options.inSampleSize=(maxOf(options.outWidth,options.outHeight)/500).coerceAtLeast(1)
+                    options.inJustDecodeBounds=false
+                    val decoded=BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
+                    // Do not cache an old/cancelled session's result, even if its HTTP call
+                    // returned just as the user switched away.
+                    if(decoded!=null && currentCoroutineContext().isActive &&
+                        sessionCurrent(expectedGeneration,expectedScope,ptp,transport)) {
+                        cache.put(key,decoded)
+                        if(isRemoteThumb) log("REMOTE 缩略图完成 ${file.name} bytes=${bytes.size} fetch=${(System.nanoTime()-started)/1_000_000}ms active=$concurrent",
+                            LogLevel.DEBUG,"THUMB")
+                        return decoded
+                    }
+                    return null
+                } catch(e: CancellationException) { throw e }
+                catch(e: Exception) {
+                    if(isRemoteThumb) log("REMOTE 缩略图失败 ${file.name}: ${e.message}",LogLevel.DEBUG,"THUMB")
+                    return null
+                } finally {
+                    if(isRemoteThumb) activeRemoteThumbnails.decrementAndGet()
                 }
-            } ?: return@withContext null
-            val options=BitmapFactory.Options().apply { inJustDecodeBounds=true }
-            BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
-            options.inSampleSize=(maxOf(options.outWidth,options.outHeight)/500).coerceAtLeast(1); options.inJustDecodeBounds=false
-            // Never backfill a newer session's cache from an old-generation request, and never return
-            // a bitmap whose session changed while it decoded.
-            val decoded=BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
-            if(decoded!=null && sessionCurrent(expectedGeneration,snapshot.queueScope,ptp,transport)) {
-                thumbs.put(key,decoded)
-                return@withContext decoded
             }
-            return@withContext null
-        } catch(e: CancellationException) { throw e } catch(_: Exception) { null }
-    } } }
+
+            if(isRemoteThumb) remoteThumbnailScheduler.load(key,{ remoteThumbs.get(key) }) { fetch() }
+            else {
+                thumbnailGate.acquire()
+                try {
+                    thumbs.get(key) ?: fetch()
+                } finally {
+                    thumbnailGate.release()
+                }
+            }
+        }
     fun enqueue(incoming:List<CameraFile>, expectedGeneration: Long = state.value.sessionGeneration,
-        geo: Map<String,GeoSnapshot> = emptyMap()) {
+        geo: Map<String,GeoSnapshot> = emptyMap()) = enqueueFiles(incoming,expectedGeneration,geo,false)
+    private fun enqueueFiles(incoming: List<CameraFile>, expectedGeneration: Long, geo: Map<String,GeoSnapshot>, automatic: Boolean) {
         val snapshot=state.value
-        if(!snapshot.connected || snapshot.sessionGeneration!=expectedGeneration) return
+        if(!snapshot.connected || snapshot.sessionGeneration!=expectedGeneration || (snapshot.oneTouchImport && !automatic)) return
         identity.locked {
             update {
                 // Re-check atomically against the latest state so a stale caller cannot overwrite it.
-                if(sessionGeneration!=expectedGeneration || queueScope!=snapshot.queueScope || !connected) this
+                if(sessionGeneration!=expectedGeneration || queueScope!=snapshot.queueScope || !connected || (oneTouchImport && !automatic)) this
                 else {
                     // For COMPUTER the current scan listing (this.files) is the source of truth: only a
                     // file that uniquely matches (id+parent+name+date+size) is enqueued, never a stale
@@ -1308,7 +1713,11 @@ class CompanionController(private val context: Context) {
                     val verified=incoming.mapNotNull { file ->
                         if(file.container) null
                         else if(mode==CameraMode.COMPUTER) matchCurrentFile(file,this.files)
-                        else file
+                        else if(mode==CameraMode.REMOTE && file.original) {
+                            if(remote.galleryActive && !remote.remoteSwitching && file.protocol==PROTOCOL_HTTP)
+                                matchCurrentFile(file,this.files)
+                            else null
+                        } else file
                     }
                     if(verified.isEmpty()) this
                     else {
@@ -1337,7 +1746,7 @@ class CompanionController(private val context: Context) {
         val sessionComputer=computer
         val token=identity.nextQueueRun()
         queueJob=scope.launch(Dispatchers.IO) {
-            val lease=background.acquire("transfer")
+            val lease=background.acquire("transfer",sessionGeneration)
             var started=false
             var sessionDied=false
             try {
@@ -1390,9 +1799,10 @@ class CompanionController(private val context: Context) {
                         }
                         if(!isPtp && resource==null) error("相机没有提供可下载的文件")
                         val isRaw=(isPtp && file.raw) || (isHttpOriginal && file.format==AV_CONTENT_FORMAT_RAW)
-                        val name=if(!isRaw && file.name.endsWith(".arw",true)) file.name.substringBeforeLast('.')+".JPG" else file.name
+                        val name=if(!isRaw && resource?.isJpeg==true) file.jpegDownloadName() else file.name
                         val source=transferSource(sessionScope,file,resource)
-                        val expected=resource?.size?.takeIf { it>0 } ?: file.size
+                        // A derivative's unknown size must not inherit the RAW/MPO original's size.
+                        val expected=resource?.size?.coerceAtLeast(0) ?: file.size
                         // An HTTP original's authoritative length is the response Content-Length (the
                         // listing size can be absent or differ). Passing 0 lets StreamCopy's own
                         // Content-Length check stand and keeps import from rejecting a valid file whose
@@ -1412,11 +1822,14 @@ class CompanionController(private val context: Context) {
                                         log={ message -> log(message,LogLevel.WARN,"GEOTAG") }) { out ->
                                         if(file.handle!=null) requireNotNull(sessionComputer).download(file,out,::progress)
                                         else requireNotNull(sessionHttp).stream(requireNotNull(resource).url) { response ->
+                                            // Validate the same HTTP-original response policy exercised
+                                            // by the MockWebServer regression tests below.
+                                            val headerLength=if(isHttpOriginal) requireFullOriginalResponse(response)
+                                                else requireNotNull(response.body).contentLength()
                                             val body=requireNotNull(response.body)
                                             // Prefer the HTTP Content-Length; when the listing size is unknown
                                             // it is the only validation available. Both absent means a chunked
                                             // body, validated as "must be non-empty" by StreamCopy.
-                                            val headerLength=body.contentLength()
                                             val total=headerLength.takeIf { it>0 } ?: expected.takeIf { it>0 } ?: 0L
                                             if(expected>0 && headerLength>0 && headerLength!=expected)
                                                 log("下载 ${file.name}：列表长度 $expected 与 HTTP 长度 $headerLength 不一致，以 HTTP 为准",LogLevel.WARN,"TRANSFER")
@@ -1545,7 +1958,7 @@ class CompanionController(private val context: Context) {
             enqueue(ready)
         } finally { update { copy(busy=false) } }
     }
-    fun clearCompleted() { update { copy(queue=queue.filter { it.state in listOf("等待","传输中") }) } }
+    fun clearCompleted() { if(state.value.oneTouchImport) return;update { copy(queue=queue.filter { it.state in listOf("等待","传输中") }) } }
     fun diagnostics(): String {
         val snapshot=state.value
         val previous=lastMode==snapshot.mode
@@ -1579,3 +1992,4 @@ class CompanionController(private val context: Context) {
         }.toString(2)
     }
 }
+

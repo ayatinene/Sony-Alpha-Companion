@@ -35,6 +35,10 @@ fun CameraFile.jpegResource(size: JpegSize = JpegSize.MAXIMUM): Resource? {
         .thenBy { it.pixelCount }.thenBy { it.size })
 }
 fun CameraFile.availableJpegSizes(): List<JpegSize> = JpegSize.entries.filter { jpegResource(it) != null }
+/** A JPEG derivative keeps the camera item's identity, but is saved with a JPEG extension. */
+fun CameraFile.jpegDownloadName(): String =
+    if(name.substringAfterLast('.').uppercase(Locale.ROOT) in setOf("ARW","MPO")) name.substringBeforeLast('.')+".JPG" else name
+
 fun CameraFile.jpegThumbnail(): Resource? = jpegResource(JpegSize.THUMBNAIL)
     ?: resources.filter { it.isJpeg }.minWithOrNull(compareBy<Resource> { if (it.pixelCount > 0) it.pixelCount else Long.MAX_VALUE }
         .thenBy { if (it.size > 0) it.size else Long.MAX_VALUE })

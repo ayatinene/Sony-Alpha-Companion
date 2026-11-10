@@ -59,9 +59,12 @@ class RemoteGalleryIntegrationTest {
     private inner class GalleryCamera(private val server: MockWebServer) : Dispatcher() {
         @Volatile var function = "Remote Shooting"
         @Volatile var status = "IDLE"
-        @Volatile var cameraFunctionFails = false
+        val cameraFunctionFailuresRemaining = java.util.concurrent.atomic.AtomicInteger(0)
+        /** Number of first-page date reads that must fail before the date directory can be listed. */
+        val dateListFailuresRemaining = java.util.concurrent.atomic.AtomicInteger(0)
         val calls = Collections.synchronizedList(mutableListOf<String>())
         val contentCount = 45
+        val dateUri = "storage:memorycard1?path=2026-01-02"
         private val apis = JSONArray(listOf("startRecMode","actTakePicture","stopRecMode","startLiveview","stopLiveview",
             "getVersions","getApplicationInfo","getSupportedCameraFunction","getCameraFunction","getEvent"))
 
@@ -85,7 +88,7 @@ class RemoteGalleryIntegrationTest {
             "getApplicationInfo" -> ok(JSONArray().put("Smart Remote").put("1.0"))
             "getSupportedCameraFunction" -> ok(JSONArray().put(JSONArray().put("Remote Shooting").put("Contents Transfer")))
             "getMethodTypes" -> ok(JSONArray().put(row("setCameraFunction","1.0")).put(row("getEvent","1.0")))
-            "getCameraFunction" -> if(cameraFunctionFails) fail(12) else ok(JSONArray().put(function))
+            "getCameraFunction" -> if(cameraFunctionFailuresRemaining.getAndUpdate { n -> (n-1).coerceAtLeast(0) } > 0) fail(12) else ok(JSONArray().put(function))
             "getEvent" -> ok(JSONArray().put(JSONObject().put("type","cameraStatus").put("cameraStatus",status))
                 .put(JSONObject().put("type","availableApiList").put("names",apis)))
             "startLiveview" -> ok(JSONArray().put(server.url("/liveview").toString()))
@@ -102,21 +105,32 @@ class RemoteGalleryIntegrationTest {
             }
             "getSchemeList" -> ok(JSONArray().put(JSONArray().put(JSONObject().put("scheme","storage"))))
             "getSourceList" -> ok(JSONArray().put(JSONArray().put("storage:memorycard1")))
-            "getContentCount" -> ok(JSONArray().put(JSONObject().put("count",contentCount)))
+            "getContentCount" -> {
+                val uri=json.optJSONArray("params")?.optJSONObject(0)?.optString("uri")
+                ok(JSONArray().put(JSONObject().put("count",if(uri==dateUri) contentCount else 1)))
+            }
             "getContentList" -> {
                 val params=json.optJSONArray("params")
                 val spec=params?.optJSONObject(0) ?: params?.optJSONObject(1)
                 val start=spec?.optInt("stIdx") ?: 0
                 val count=spec?.optInt("cnt") ?: 20
                 val items=JSONArray()
-                for(i in start until minOf(start+count,contentCount)) {
-                    val name="DSC%05d.JPG".format(i)
-                    items.put(JSONObject().put("uri","content://$i").put("contentKind","still").put("createdTime","2026-01-02T03:04:05Z")
-                        .put("content",JSONObject()
-                            .put("original",JSONArray().put(JSONObject().put("url","http://cam/$name").put("fileName",name).put("fileSize",1000).put("stillObject","jpeg")))
-                            .put("largeUrl","http://cam/pv_$i.jpg")))
+                val uri=spec?.optString("uri").orEmpty()
+                // A non-retriable error (not NotAvailableNow) makes a date first page really fail once.
+                val dateListFailed = uri==dateUri && dateListFailuresRemaining.getAndUpdate { n -> (n-1).coerceAtLeast(0) } > 0
+                if(uri=="storage:memorycard1") {
+                    if(start==0) items.put(JSONObject().put("uri",dateUri)
+                        .put("title","2026-01-02").put("contentKind","date").put("isBrowsable","true"))
+                } else if(uri==dateUri && !dateListFailed) {
+                    for(i in start until minOf(start+count,contentCount)) {
+                        val name="DSC%05d.JPG".format(i)
+                        items.put(JSONObject().put("uri","content://$i").put("contentKind","still").put("createdTime","2026-01-02T03:04:05Z")
+                            .put("content",JSONObject()
+                                .put("original",JSONArray().put(JSONObject().put("url","http://cam/$name").put("fileName",name).put("fileSize",1000).put("stillObject","jpeg")))
+                                .put("largeUrl","http://cam/pv_$i.jpg")))
+                    }
                 }
-                ok(JSONArray().put(items))
+                if(dateListFailed) fail(12) else ok(JSONArray().put(items))
             }
             else -> ok(JSONArray().put(0))
         }
@@ -175,25 +189,65 @@ class RemoteGalleryIntegrationTest {
             assertTrue("setCameraFunction must follow stopLiveview",set>stop)
             assertFalse("a mode switch must never stop record mode",calls.contains("stopRecMode"))
             assertTrue("first page published immediately",controller.state.value.files.isNotEmpty())
-            assertEquals("45", controller.state.value.remote.totalFiles?.toString() ?: "null")
+            assertEquals("1", controller.state.value.remote.totalFiles?.toString() ?: "null")
+            assertEquals("2026-01-02",controller.state.value.files.single().name)
+            assertTrue(controller.state.value.files.single().container)
         }
     }
 
-    @Test fun loadMoreAppendsTheNextPage() {
+    @Test fun selectingDateAutomaticallyLoadsEveryPage() {
         MockWebServer().use { server ->
             val camera=GalleryCamera(server)
             connectGallery(server,camera)
             controller.openRemoteGallery()
             waitUntil { controller.state.value.remote.galleryActive && !controller.state.value.remote.remoteSwitching }
-            assertEquals(20,controller.state.value.files.size)
-            assertTrue(controller.state.value.remote.hasMoreFiles)
-            controller.loadMoreRemoteFiles()
-            waitUntil { controller.state.value.files.size==40 }
-            assertTrue(controller.state.value.remote.hasMoreFiles)
-            controller.loadMoreRemoteFiles()
-            waitUntil { controller.state.value.files.size==45 }
+            assertEquals(1,controller.state.value.files.size)
+            val folder=controller.state.value.files.single()
+            assertTrue(folder.container)
+            controller.browse(folder.id)
+            waitUntil(20_000) {
+                controller.state.value.folder==folder.id &&
+                    controller.state.value.files.size==45 && !controller.state.value.remote.loadingMore
+            }
             assertFalse("the declared count is reached",controller.state.value.remote.hasMoreFiles)
             assertEquals(45,controller.state.value.remote.loadedContentCount)
+            assertFalse(controller.state.value.remote.loadMoreFailed)
+            controller.up()
+            waitUntil { controller.state.value.folder=="storage:memorycard1" && !controller.state.value.remote.loadingMore }
+            assertEquals(listOf("2026-01-02"),controller.state.value.files.map { it.name })
+            assertTrue(controller.state.value.galleryPath.isEmpty())
+            assertEquals(1, camera.calls.count { it=="setCameraFunction" })
+        }
+    }
+
+    @Test fun dateFirstPageFailureOffersRetryAndReloadsThatDate() {
+        MockWebServer().use { server ->
+            val camera=GalleryCamera(server)
+            connectGallery(server,camera)
+            controller.openRemoteGallery()
+            waitUntil { controller.state.value.remote.galleryActive && !controller.state.value.remote.remoteSwitching }
+            val folder=controller.state.value.files.single()
+            assertTrue(folder.container)
+            camera.dateListFailuresRemaining.set(1)
+            controller.browse(folder.id)
+            waitUntil(20_000) { controller.state.value.folder==folder.id && controller.state.value.files.isEmpty() &&
+                !controller.state.value.remote.loadingMore }
+            // The failed date first page enters that date's error state (RemoteGalleryError + retry).
+            assertTrue(controller.state.value.error?.contains("无法读取相机文件")==true)
+            assertEquals(listOf("storage:memorycard1"),controller.state.value.galleryPath)
+            assertFalse(controller.state.value.remote.loadMoreFailed)
+            assertFalse(controller.state.value.remote.hasMoreFiles)
+            // "重试" is refreshCameraFiles -> reloadRemoteGallery; it must reload the SAME date, not the root.
+            controller.refreshCameraFiles()
+            waitUntil(20_000) { controller.state.value.folder==folder.id && controller.state.value.files.size==45 &&
+                !controller.state.value.remote.loadingMore }
+            assertNull(controller.state.value.error)
+            assertEquals(45,controller.state.value.remote.loadedContentCount)
+            // The date stays the current directory, so returning still works: up() goes back to the root.
+            controller.up()
+            waitUntil(20_000) { controller.state.value.folder=="storage:memorycard1" && !controller.state.value.remote.loadingMore }
+            assertEquals(listOf("2026-01-02"),controller.state.value.files.map { it.name })
+            assertTrue(controller.state.value.galleryPath.isEmpty())
         }
     }
 
@@ -202,13 +256,14 @@ class RemoteGalleryIntegrationTest {
             val camera=GalleryCamera(server)
             connectGallery(server,camera,visible=true)
             controller.openRemoteGallery()
-            waitUntil { controller.state.value.remote.galleryActive && !controller.state.value.remote.remoteSwitching }
-            camera.cameraFunctionFails=true
+            waitUntil(20_000) { controller.state.value.remote.galleryActive && !controller.state.value.remote.remoteSwitching }
+            // Simulate a transient error, not a permanently broken cameraFunction endpoint.
+            camera.cameraFunctionFailuresRemaining.set(2)
             val liveViewsBefore=camera.calls.count { it=="startLiveview" }
             controller.returnToRemoteCapture()
-            waitUntil { !controller.state.value.remote.galleryActive }
+            waitUntil(20_000) { !controller.state.value.remote.galleryActive }
             assertFalse(controller.state.value.remote.remoteSwitching)
-            waitUntil { camera.calls.count { it=="startLiveview" }>liveViewsBefore }
+            waitUntil(20_000) { camera.calls.count { it=="startLiveview" }>liveViewsBefore }
         }
     }
 }

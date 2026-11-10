@@ -70,11 +70,26 @@ class GalleryInterfaceTest {
         var state by mutableStateOf(jpeg(listOf(jpegFile("a"))))
         compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions()) } }
         compose.onNodeWithContentDescription("返回根目录").assertExists()
-        compose.onNodeWithText("ARW").assertDoesNotExist()
+        compose.onNodeWithTag("gallery-filter-ARW").assertDoesNotExist()
         compose.onNodeWithText("仅下载相机实际提供的 JPEG 尺寸",substring=true).assertExists()
         compose.runOnIdle { state=computer(listOf(rawFile("r")),ScanState(phase=ScanPhase.Done)) }
         compose.onNodeWithContentDescription("返回根目录").assertDoesNotExist()
-        compose.onNodeWithText("ARW").assertExists()
+        compose.onNodeWithTag("gallery-filter-ARW").assertExists()
+    }
+
+    @Test fun jpegDateFolderCanReturnToParentWithoutReconnect() {
+        var wentUp=0
+        var state by mutableStateOf(jpeg(listOf(jpegFile("a"))).copy(
+            folder="date-2024",galleryPath=listOf("PhotoRoot")
+        ))
+        compose.setContent { MaterialTheme {
+            CameraGallery(state,GalleryActions(up={wentUp++}))
+        } }
+        compose.onNodeWithContentDescription("返回上一级").assertExists().performClick()
+        compose.runOnIdle { assertEquals(1,wentUp) }
+        compose.runOnIdle { state=state.copy(folder="PhotoRoot",galleryPath=emptyList()) }
+        compose.onNodeWithContentDescription("返回上一级").assertDoesNotExist()
+        compose.onNodeWithContentDescription("返回根目录").assertExists()
     }
 
     @Test fun longPressSelectAllAndCancelDriveTheDownloadCount() {
@@ -91,7 +106,7 @@ class GalleryInterfaceTest {
         val enqueued=mutableListOf<List<CameraFile>>()
         render(computer(listOf(rawFile("a"),jpegFile("b")),ScanState(phase=ScanPhase.Done)),GalleryActions(enqueue={files,_->enqueued+=files}))
         compose.onNodeWithText("全选 2").performClick()
-        compose.onNodeWithText("ARW").performClick()
+        compose.onNodeWithTag("gallery-filter-ARW").performClick()
         compose.onNodeWithText("另有 1 项被筛选隐藏，不会下载。").assertExists()
         compose.onNodeWithText("下载 1 个文件").performClick()
         compose.runOnIdle {
@@ -258,9 +273,21 @@ class GalleryInterfaceTest {
         compose.onNodeWithTag("gallery-list").assertExists()
         compose.onNodeWithTag("gallery-grid").assertDoesNotExist()
         compose.onNodeWithText("a").assertExists()
-        compose.onNodeWithText("ARW · 未知大小",substring=true).assertExists()
+        compose.onNodeWithText("ARW · 未知大小",substring=true).assertDoesNotExist()
         compose.onNodeWithContentDescription("照片信息 a").assertExists()
         compose.onNodeWithContentDescription("切换为网格").assertExists()
+    }
+
+    @Test fun filesWithNoReportedSizeDoNotDisplayUnknownSizeAnywhere() {
+        val original=CameraFile("original","DSC00001.ARW",raw=true,original=true,
+            protocol=PROTOCOL_HTTP,format="arw",size=0)
+        var state by mutableStateOf(remoteGallery(listOf(original),
+            RemoteState(canBrowseGallery=true,loadedContentCount=1,totalFiles=1)))
+        compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions()) } }
+        compose.onNodeWithText("未知大小",substring=true).assertDoesNotExist()
+        compose.onNodeWithContentDescription("照片信息 DSC00001.ARW").performClick()
+        compose.onNodeWithText("ARW 原文件").assertExists()
+        compose.onNodeWithText("未知大小",substring=true).assertDoesNotExist()
     }
 
     @Test fun folderRowsHaveNoInfoButton() {
@@ -274,7 +301,7 @@ class GalleryInterfaceTest {
         render(computer(listOf(rawFile("a"),jpegFile("b")),ScanState(phase=ScanPhase.Done)))
         compose.onNodeWithTag("gallery-item-a").performTouchInput { longClick() }
         compose.onNodeWithTag("gallery-item-b").performTouchInput { longClick() }
-        compose.onNodeWithText("ARW").performClick()
+        compose.onNodeWithTag("gallery-filter-ARW").performClick()
         compose.onNodeWithText("另有 1 项被筛选隐藏，不会下载。").assertExists()
         compose.onNodeWithTag("gallery-layout-toggle").performClick()
         compose.onNodeWithTag("gallery-list").assertExists()
@@ -435,14 +462,14 @@ class GalleryInterfaceTest {
         val restoration=StateRestorationTester(compose)
         restoration.setContent { MaterialTheme { CameraGallery(computer(listOf(rawFile("a"),jpegFile("b")),ScanState(phase=ScanPhase.Done)),GalleryActions()) } }
         compose.onNodeWithTag("gallery-layout-toggle").performClick()
-        compose.onNodeWithText("ARW").performClick()
+        compose.onNodeWithTag("gallery-filter-ARW").performClick()
         compose.onNodeWithTag("gallery-sort-menu").performClick()
         compose.onNodeWithTag("gallery-sort-Oldest").performClick()
         compose.onNodeWithTag("gallery-list").assertExists()
         restoration.emulateSavedInstanceStateRestore()
         compose.onNodeWithTag("gallery-list").assertExists()
         compose.onNodeWithContentDescription("排序：拍摄时间：最早优先").assertExists()
-        compose.onNodeWithText("ARW").assertIsSelected()
+        compose.onNodeWithTag("gallery-filter-ARW").assertIsSelected()
     }
 
     @Test fun stateRestorationKeepsTheListScrollPosition() {
@@ -505,13 +532,14 @@ class GalleryInterfaceTest {
         compose.onNodeWithTag("remote-gallery-returning").assertDoesNotExist()
     }
 
-    @Test fun loadedCountUsesTheContentItemCountAndOffersTheNextPage() {
+    @Test fun loadedCountUsesContentItemCountWithoutManualPagination() {
         val loads=mutableListOf<Unit>()
         render(remoteGallery(listOf(rawFile("a")),RemoteState(canBrowseGallery=true,loadedContentCount=20,totalFiles=40,hasMoreFiles=true)),
             GalleryActions(loadMore={loads+=Unit}))
         compose.onNodeWithText("已加载 20 / 40 项").assertExists()
-        compose.onNodeWithText("加载更多（20 项）").performClick()
-        compose.runOnIdle { assertEquals(1,loads.size) }
+        compose.onNodeWithText("加载更多（20 项）").assertDoesNotExist()
+        compose.onNodeWithText("重试").assertDoesNotExist()
+        compose.runOnIdle { assertTrue(loads.isEmpty()) }
     }
 
     @Test fun anUnknownTotalIsReportedAsTheRecentCountWithoutInventingOne() {
@@ -528,9 +556,9 @@ class GalleryInterfaceTest {
 
     @Test fun remoteGalleryOffersTheJpegAndArwFilters() {
         render(remoteGallery(listOf(rawFile("a"),jpegFile("b")),RemoteState(canBrowseGallery=true,loadedContentCount=2)))
-        compose.onNodeWithText("ARW").assertExists()
+        compose.onNodeWithTag("gallery-filter-ARW").assertExists()
         compose.onNodeWithText("可按 JPEG / ARW 筛选并下载相机原文件。").assertExists()
-        compose.onNodeWithText("ARW").performClick()
+        compose.onNodeWithTag("gallery-filter-ARW").performClick()
         compose.onNodeWithTag("gallery-item-a").assertExists()
         compose.onNodeWithTag("gallery-item-b").assertDoesNotExist()
     }
@@ -572,11 +600,11 @@ class GalleryInterfaceTest {
         compose.runOnIdle { assertEquals(1,reconnects.size) }
     }
 
-    @Test fun theReturnButtonIsAlsoBlockedWhileLoadingOrBusy() {
+    @Test fun returnAllowsBackgroundPaginationButBlocksBusyState() {
         val loading=remoteGallery(listOf(rawFile("a")),RemoteState(canBrowseGallery=true,loadedContentCount=1,loadingMore=true))
         var state by mutableStateOf(loading)
         compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions()) } }
-        compose.onNodeWithTag("remote-gallery-return").assertIsNotEnabled()
+        compose.onNodeWithTag("remote-gallery-return").assertIsEnabled()
         compose.runOnIdle { state=state.copy(remote=state.remote.copy(loadingMore=false),busy=true) }
         compose.onNodeWithTag("remote-gallery-return").assertIsNotEnabled()
     }
@@ -597,12 +625,13 @@ class GalleryInterfaceTest {
         compose.onNodeWithText("无法读取相机文件，请重试或返回拍摄。").assertDoesNotExist()
     }
 
-    @Test fun aFirstPageWithoutSupportedFilesStillOffersTheNextPage() {
+    @Test fun unsupportedFirstPageContinuesAutoLoadingWithoutManualButton() {
         // The first page held only unsupported content (movie / no original): not an error, keep loading.
         render(remoteGallery(emptyList(),RemoteState(canBrowseGallery=true,loadedContentCount=20,totalFiles=40,hasMoreFiles=true)))
         compose.onNodeWithText("没有可显示的照片").assertExists()
         compose.onNodeWithText("无法读取相机文件，请重试或返回拍摄。").assertDoesNotExist()
-        compose.onNodeWithText("加载更多（20 项）").assertExists()
+        compose.onNodeWithText("加载更多（20 项）").assertDoesNotExist()
+        compose.onNodeWithText("已加载 20 / 40 项").assertExists()
     }
 
     @Test fun anUnknownCountEmptyPageIsNotAnError() {
@@ -613,18 +642,21 @@ class GalleryInterfaceTest {
         compose.onNodeWithText("加载更多（20 项）").assertDoesNotExist()
     }
 
-    @Test fun aFailedPageWithExistingFilesOffersAConciseFooterRetry() {
+    @Test fun failedAutomaticPageOffersManualRetry() {
+        val retries=mutableListOf<Unit>()
         var state by mutableStateOf(remoteGallery(listOf(rawFile("a")),RemoteState(canBrowseGallery=true,loadedContentCount=1,totalFiles=40,hasMoreFiles=true)))
-        compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions()) } }
+        compose.setContent { MaterialTheme { CameraGallery(state,GalleryActions(loadMore={retries+=Unit})) } }
         compose.onNodeWithText("加载更多失败，请重试。").assertDoesNotExist()
         compose.runOnIdle { state=state.copy(remote=state.remote.copy(loadMoreFailed=true),error="加载更多失败，请重试。") }
         compose.onNodeWithText("加载更多失败，请重试。").assertExists()
-        compose.onNodeWithText("加载更多（20 项）").assertExists()
+        compose.onNodeWithText("重试").performClick()
+        compose.runOnIdle { assertEquals(1,retries.size) }
     }
 
-    @Test fun theLoadMoreButtonIsBlockedWhileTransferring() {
-        render(remoteGallery(listOf(rawFile("a")),RemoteState(canBrowseGallery=true,loadedContentCount=1,totalFiles=40,hasMoreFiles=true)).copy(transferring=true))
-        compose.onNodeWithText("加载更多（20 项）").assertIsNotEnabled()
+    @Test fun paginationRetryIsBlockedWhileTransferring() {
+        render(remoteGallery(listOf(rawFile("a")),RemoteState(canBrowseGallery=true,
+            loadedContentCount=1,totalFiles=40,hasMoreFiles=true,loadMoreFailed=true)).copy(transferring=true))
+        compose.onNodeWithText("重试").assertIsNotEnabled()
     }
 
     @Test fun aModeEpochChangeClearsSelectionAndPreview() {

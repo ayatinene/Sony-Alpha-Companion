@@ -13,6 +13,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -55,6 +59,102 @@ class InterfaceTest {
         assertTrue("exposure stays at the left edge",parameter.right<=viewfinder.center.x)
         assertTrue("controls stay at the right edge",shutter.left>=viewfinder.center.x)
         capture("remote-landscape",compose.onNodeWithTag("remote-screen"))
+    }
+
+    @Test fun landscapeHeaderStaysAtTheSafeTopHidesAndReturnsWithoutMovingCaptureControls() {
+        compose.mainClock.autoAdvance=false
+        val insets=WorkspaceInsets(top=20.dp,left=8.dp,right=8.dp)
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(740.dp,340.dp)) { RemoteWorkspace(remote,landscapeImage(),false,insets,actions(),remember { SnackbarHostState() }) }
+        } }
+        compose.mainClock.advanceTimeByFrame()
+        val screen=bounds("remote-screen"); val header=bounds("remote-header")
+        val shutter=bounds("remote-controls")
+        val safeTop=with(compose.density) { 24.dp.toPx() }
+        assertEquals("header is pinned to the safe top",screen.top+safeTop,header.top,2f)
+        assertTrue("header must not expand to screen height",header.height<=with(compose.density) { 56.dp.toPx() })
+        compose.mainClock.advanceTimeBy(4_500)
+        compose.onNodeWithTag("remote-header").assertDoesNotExist()
+        assertEquals(shutter,bounds("remote-controls"))
+        compose.onNodeWithTag("remote-viewfinder").performTouchInput { click(center) }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("remote-header").assertExists()
+        assertEquals(header.top,bounds("remote-header").top,1f)
+        compose.mainClock.advanceTimeBy(3_000)
+        compose.onNodeWithTag("remote-header").assertExists()
+        compose.onNodeWithTag("remote-viewfinder").performTouchInput { click(center) }
+        compose.mainClock.advanceTimeBy(2_000)
+        compose.onNodeWithTag("remote-header").assertExists()
+        compose.mainClock.advanceTimeBy(2_500)
+        compose.onNodeWithTag("remote-header").assertDoesNotExist()
+    }
+
+    @Test fun holdingAFingerDownKeepsTheLandscapeHeaderVisibleUntilItIsLifted() {
+        compose.mainClock.autoAdvance=false
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            Box(Modifier.size(740.dp,340.dp)) { RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
+        } }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("remote-viewfinder").performTouchInput { down(center) }
+        compose.mainClock.advanceTimeByFrame()
+        compose.mainClock.advanceTimeBy(6_000)
+        compose.onNodeWithTag("remote-header").assertExists()
+        compose.onNodeWithTag("remote-viewfinder").performTouchInput { up() }
+        compose.mainClock.advanceTimeByFrame()
+        compose.mainClock.advanceTimeBy(4_500)
+        compose.onNodeWithTag("remote-header").assertDoesNotExist()
+    }
+
+    @Test fun resumingAfterLosingFocusWhileHoldingReArmsTheLandscapeHeaderAutoHide() {
+        compose.mainClock.autoAdvance=false
+        val owner=TestLifecycleOwner()
+        compose.runOnUiThread { owner.registry.currentState=Lifecycle.State.RESUMED }
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                Box(Modifier.size(740.dp,340.dp)) { RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
+            }
+        } }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("remote-header").assertExists()
+        // Focus is lost while a finger is down, so the cancelled pointer stream never sends an up event.
+        compose.onNodeWithTag("remote-viewfinder").performTouchInput { down(center) }
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.onNodeWithTag("remote-header").assertExists()
+        compose.runOnUiThread { owner.registry.currentState=Lifecycle.State.CREATED }
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.runOnUiThread { owner.registry.currentState=Lifecycle.State.RESUMED }
+        compose.mainClock.advanceTimeBy(1_000)
+        compose.onNodeWithTag("remote-header").assertExists()
+        compose.mainClock.advanceTimeBy(4_500)
+        compose.onNodeWithTag("remote-header").assertDoesNotExist()
+        compose.onNodeWithTag("remote-viewfinder").performTouchInput { up() }
+    }
+
+    @Test fun touchExplorationPinsTheLandscapeHeaderAndRestartsTheTimerOnceTurnedOff() {
+        compose.mainClock.autoAdvance=false
+        var exploring by mutableStateOf(true)
+        compose.setContent { MaterialTheme(colorScheme=darkColorScheme()) {
+            CompositionLocalProvider(LocalTouchExplorationEnabled provides exploring) {
+                Box(Modifier.size(740.dp,340.dp)) { RemoteWorkspace(remote,landscapeImage(),false,WorkspaceInsets(),actions(),remember { SnackbarHostState() }) }
+            }
+        } }
+        compose.mainClock.advanceTimeByFrame()
+        compose.onNodeWithTag("remote-header").assertExists()
+        // Touch exploration sends no pressed pointer event, so the header must never auto-hide.
+        compose.mainClock.advanceTimeBy(20_000)
+        compose.onNodeWithTag("remote-header").assertExists()
+        compose.runOnUiThread { exploring=false }
+        compose.mainClock.advanceTimeByFrame()
+        compose.mainClock.advanceTimeBy(3_000)
+        compose.onNodeWithTag("remote-header").assertExists()
+        compose.mainClock.advanceTimeBy(2_500)
+        compose.onNodeWithTag("remote-header").assertDoesNotExist()
+    }
+
+    /** Drives the workspace lifecycle directly so focus loss and resume can be reproduced. */
+    private class TestLifecycleOwner : LifecycleOwner {
+        val registry=LifecycleRegistry(this)
+        override val lifecycle get()=registry
     }
 
     @Test fun portraitUsesTheFullWidthAndStacksThePanelBelowTheImage() {
@@ -275,3 +375,4 @@ class InterfaceTest {
         resolver.update(uri,ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING,0) },null,null)
     }
 }
+

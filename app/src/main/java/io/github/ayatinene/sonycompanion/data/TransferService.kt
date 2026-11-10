@@ -38,7 +38,11 @@ class TransferService: Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         lastStartId = startId
         when(intent?.action) {
-            "cancel" -> { controller.cancelBackgroundWork(); stopSelfSafely(); return START_NOT_STICKY }
+            "cancel" -> {
+                if(controller.state.value.oneTouchImport) controller.cancelOneTouchImport()
+                else { controller.cancelBackgroundWork();stopSelfSafely() }
+                return START_NOT_STICKY
+            }
             "stop" -> { stopSelfSafely(); return START_NOT_STICKY }
         }
         if(!ensureForeground()) return START_NOT_STICKY
@@ -85,7 +89,7 @@ class TransferService: Service() {
      * foreground service but releases the CPU lock. The lock is re-armed periodically so a long scan
      * never silently loses it, capped at a finite total to respect Android's background limits. */
     private fun maintainWakeLock(state: AppState) {
-        val needCpu = state.transferring || (state.scan.phase==ScanPhase.Scanning && !state.scan.paused)
+        val needCpu = state.oneTouchImport || state.transferring || (state.scan.phase==ScanPhase.Scanning && !state.scan.paused)
         if(needCpu) startWakeLock() else stopWakeLock()
     }
     private fun startWakeLock() {
@@ -119,6 +123,7 @@ class TransferService: Service() {
         val open=PendingIntent.getActivity(this,1,Intent(this,MainActivity::class.java),PendingIntent.FLAG_IMMUTABLE)
         val cancel=PendingIntent.getService(this,2,Intent(this,TransferService::class.java).setAction("cancel"),PendingIntent.FLAG_IMMUTABLE)
         val text=when {
+            state.oneTouchImport -> "正在自动导入相机共享照片"
             state.transferring && state.scan.phase==ScanPhase.Scanning -> "正在扫描并传输相机文件"
             state.transferring -> "正在传输相机文件"
             state.scan.phase==ScanPhase.Scanning -> "正在扫描相机文件 ${state.scan.scanned}/${state.scan.total ?: "?"}"
@@ -147,3 +152,4 @@ class TransferService: Service() {
         private const val WAKE_LOCK_RENEW_MARGIN_MILLIS = 30_000L
     }
 }
+
