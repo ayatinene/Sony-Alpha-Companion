@@ -7,8 +7,10 @@ responses in as JSON files and consumes the printed key=value outputs.
 
 The version and the exact source revision are read from the build metadata that
 the Gradle build emits, never guessed from an artifact file name, and both the
-unit-test/lint/build workflow (Android Debug) and the interface workflow
-(Android UI) must have succeeded for the same commit on the default branch.
+release build workflow (Android Release Build: release unit tests, lint and
+assembleRelease) and the interface workflow (Android UI) must have succeeded for
+the same commit on the default branch. The metadata also records the build
+variant so a debug build can never masquerade as the published Release artifact.
 """
 from __future__ import annotations
 
@@ -20,10 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-DEBUG_WORKFLOW = "Android Debug"
+BUILD_WORKFLOW = "Android Release Build"
 UI_WORKFLOW = "Android UI"
-REQUIRED_WORKFLOWS = (DEBUG_WORKFLOW, UI_WORKFLOW)
+REQUIRED_WORKFLOWS = (BUILD_WORKFLOW, UI_WORKFLOW)
 DEFAULT_BRANCH = "main"
+RELEASE_VARIANT = "release"
 REVISION_PLACEHOLDER = "unknown"
 VERSION_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]*$")
 HEX_PATTERN = re.compile(r"^[0-9a-f]{7,40}$")
@@ -43,7 +46,7 @@ def release_tag(version_name: str, git_revision: str) -> str:
     return f"v{version_name}-{git_revision}"
 
 
-def debug_apk_name(version_name: str, git_revision: str, variant: str = "debug") -> str:
+def release_apk_name(version_name: str, git_revision: str, variant: str = RELEASE_VARIANT) -> str:
     return f"AlphaCompanion-{version_name}-{git_revision}-{variant}.apk"
 
 
@@ -55,16 +58,22 @@ def _clean(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
-def validate_build_metadata(metadata: Any, head_sha: str) -> tuple[str, str]:
+def validate_build_metadata(metadata: Any, head_sha: str, expected_variant: str = RELEASE_VARIANT) -> tuple[str, str]:
     """Return ``(version_name, git_revision)`` or raise :class:`MetadataError`."""
     if not isinstance(metadata, Mapping):
         raise MetadataError("build metadata is missing or not an object")
     version = _clean(metadata.get("versionName")).strip()
     revision = _clean(metadata.get("gitRevision")).strip()
     full_sha = _clean(metadata.get("gitSha")).strip()
+    variant = _clean(metadata.get("variant")).strip()
     dirty = metadata.get("dirty")
     if not version or not VERSION_PATTERN.match(version):
         raise MetadataError(f"unusable versionName: {version!r}")
+    if variant != expected_variant:
+        raise MetadataError(
+            f"build metadata variant {variant!r} is not {expected_variant!r}; "
+            "a Release artifact must not be a debug masquerade"
+        )
     if not revision or revision == REVISION_PLACEHOLDER or not HEX_PATTERN.match(revision):
         raise MetadataError(f"unusable gitRevision: {revision!r}")
     if full_sha and not HEX_PATTERN.match(full_sha):
@@ -131,7 +140,7 @@ def select_runs(payload: Any, head_sha: str, default_branch: str = DEFAULT_BRANC
     ]
 
 
-def select_debug_run_id(runs: Sequence[Mapping[str, Any]]) -> str:
+def select_build_run_id(runs: Sequence[Mapping[str, Any]]) -> str:
     latest = _latest(runs)
     return "" if latest is None else str(latest.get("id", ""))
 
@@ -209,18 +218,19 @@ def _find_apk(artifacts: Path, expected_name: str) -> Path:
 
 def _release_notes(version: str, revision: str, head_sha: str) -> str:
     return (
-        "自动构建的预览版（Debug，固定签名）。\n\n"
+        "自动构建的预览版（Release，固定签名且不可调试）。\n\n"
         f"- 版本：{version} ({revision})\n"
         f"- 对应提交：{head_sha}\n"
-        "- 验证：Android Debug（单元测试、Lint、构建、签名证书校验）与 Android UI 均已通过。\n"
-        f"- 附件：{debug_apk_name(version, revision)}\n\n"
+        "- 验证：Android Release Build（Release 单元测试、Lint、assembleRelease、固定签名证书与非调试校验）"
+        "与 Android UI 均已通过。\n"
+        f"- 附件：{release_apk_name(version, revision)}\n\n"
         "源码、构建方式与许可见仓库 README、docs/ 与 licenses/。\n"
     )
 
 
 def _command_decide(args: argparse.Namespace) -> int:
     runs_by_workflow = {
-        DEBUG_WORKFLOW: select_runs(_read_json(args.debug_runs), args.head_sha, args.default_branch, args.repository),
+        BUILD_WORKFLOW: select_runs(_read_json(args.build_runs), args.head_sha, args.default_branch, args.repository),
         UI_WORKFLOW: select_runs(_read_json(args.ui_runs), args.head_sha, args.default_branch, args.repository),
     }
     decision = decide_release(
@@ -239,7 +249,7 @@ def _command_decide(args: argparse.Namespace) -> int:
         {
             "decision": "release" if decision.ready else "skip",
             "reason": decision.reason,
-            "debug_run_id": select_debug_run_id(runs_by_workflow[DEBUG_WORKFLOW]) if decision.ready else "",
+            "build_run_id": select_build_run_id(runs_by_workflow[BUILD_WORKFLOW]) if decision.ready else "",
         },
     )
     return 0
@@ -248,7 +258,7 @@ def _command_decide(args: argparse.Namespace) -> int:
 def _command_prepare(args: argparse.Namespace) -> int:
     try:
         version, revision = validate_build_metadata(_read_json(args.metadata), args.head_sha)
-        apk = _find_apk(Path(args.artifacts), debug_apk_name(version, revision))
+        apk = _find_apk(Path(args.artifacts), release_apk_name(version, revision))
     except MetadataError as error:
         sys.stderr.write(f"release metadata rejected: {error}\n")
         return 1
@@ -280,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     decide.add_argument("--head-repository", required=True)
     decide.add_argument("--head-sha", required=True)
     decide.add_argument("--conclusion", required=True)
-    decide.add_argument("--debug-runs")
+    decide.add_argument("--build-runs")
     decide.add_argument("--ui-runs")
     decide.add_argument("--github-output")
     decide.set_defaults(func=_command_decide)

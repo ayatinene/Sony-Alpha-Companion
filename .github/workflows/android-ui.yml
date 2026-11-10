@@ -2,7 +2,6 @@ name: Android UI
 on:
   push:
     branches: [main]
-    paths: ['app/**', 'gradle/**', '.github/workflows/android-ui.yml', '.github/scripts/run_ui_tests.sh']
   workflow_dispatch:
 permissions:
   contents: read

@@ -6,8 +6,9 @@
 ## 测试状态
 
 - 自动化测试与构建：
+  - CI 构建与发布门禁：`Android Release Build` 执行 `testReleaseUnitTest`、`lintRelease`、`assembleRelease` 并校验固定签名证书与非 `debuggable` 属性，产出 `AlphaCompanion-<版本>-<短SHA>-release.apk`（`Alpha-Companion-Release-APK`）；`Android UI` 在模拟器执行 `connectedDebugAndroidTest`，`main` 分支同一提交两项均通过后由 `Android Release Publish` 发布 GitHub Pre-release。
   - `0.1.14-preview`（`versionCode 15`，提交 `2104784`）：JVM 单元测试 349 项通过（42 个套件，0 失败 / 错误 / 跳过），Android 运行时测试 116 项通过（0 失败 / 错误 / 跳过），Android Lint 0 错误、38 警告，固定签名 APK 构建与证书指纹校验通过（[Android Debug #41844807957](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/41844807957)、[Android 运行时检查 #41844807964](https://github.com/ayatinene/Sony-Alpha-Companion/actions/runs/41844807964)）。
-  - 上一已验证基线 `0.1.13-preview`（提交 `877a43c`）：JVM 单元测试 280 项（38 个套件）与 Android 运行时测试 89 项通过，Lint 0 错误、38 警告。
+  - `0.1.13-preview`（`versionCode 14`，提交 `877a43c`）：JVM 单元测试 280 项（38 个套件）与 Android 运行时测试 89 项通过，Lint 0 错误、38 警告。
 - 实机测试：
   - 遥控拍摄与传统 JPEG 传图（Send to Smartphone）主流程已在 α7R II 上实测可用，无明显问题（属总体测试结果，不代表每个子项边界已逐一覆盖）。
   - 遥控同热点内容传输（`avContent`）原厂协议实测：早期实测曾记录机内 Smart Remote 返回 `3.21`（API 1.0，当时曝光参数仅开放 EV）；最新在原厂 α7R II 环境（未修改或重装相机 APK）通过命令行请求实测时未保存 `getApplicationInfo` 返回值，确切机内应用版本未知（既不能推断 `3.21` 不支持该能力，也不能推断机内应用已升级）。实测证实：
@@ -19,6 +20,7 @@
   - `0.1.12-preview` 实机已观察到具体的 PTP/IP 断开恢复问题：在 RAW 扫描进行途中由手机主动断开连接后（该次未开启“断开时让相机休眠（实验性）”开关，扫描在途断开直接强制中止底层连接，未执行 `CloseSession` 或休眠命令），相机机身仍保持在旧的发送状态，导致之后再次重连失败。技术上虽无法仅凭手机端超时日志分辨相机内部 PTP 会话是否已释放，但机身保持发送状态并阻碍后续重连属已确认的实机现象（当前版本尚未修复该在途断开恢复问题，也不要求强制开启实验性休眠开关）。连接正常空闲时的手动断开收尾及“断开时让相机休眠（实验性）”开关仍待实机验证。
   - `0.1.13-preview` 的 JPEG 日期文件夹按所选方向排序、连接入口按需通知权限检查、拍摄页跟随手机旋转（默认开启，退出恢复系统方向）以及为遥控照片添加手机位置（默认关闭）待实机验证。
   - `0.1.14-preview` 在本应用内集成的遥控拍摄页同连接进入相机图库、按每页最多 20 个内容项倒序分页读取、复用 `全部 / JPEG / ARW` 筛选与原文件下载、忙碌禁止切换、下载取消后再返回拍摄，以及切回拍摄后恢复 Live View 与快门待本应用实机验证。
+  - `0.1.15-preview` / `0.1.16-preview` 二维码与 NFC 配对：二维码配对进入遥控拍摄并显示实时取景（vivo V2502A，Android SDK 37）、NFC 触碰进入遥控拍摄及进入 JPEG 传图下载单张原尺寸 JPEG（`DSC02200.JPG`，`2,490,368` bytes）并发送 `X_TransferEnd` 断开（Xiaomi 23127PN0CC，Android SDK 35）已在 ILCE-7RM2 实机确认；`0.1.16-preview` 新增的 NFC 一触分享自动导入协调流程（触碰后自动落盘、机内多选批量导入及中途取消导入）待实机验证（详见 [PAIRING.md](PAIRING.md)）。
 
 ## 已知限制
 

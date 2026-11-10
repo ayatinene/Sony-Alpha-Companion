@@ -1,4 +1,4 @@
-name: Android Debug
+name: Android Release Build
 on:
   push:
     branches: [main, 'feat/**', 'fix/**']
@@ -37,30 +37,69 @@ jobs:
         env:
           ANDROID_SIGNING_BUNDLE: ${{ secrets.ANDROID_SIGNING_BUNDLE }}
         run: python3 .github/scripts/prepare_signing.py
-      - name: Test, lint and build
+      - name: Test, lint and build release
         shell: bash
         run: |
           chmod +x gradlew
           set -o pipefail
-          ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:lintDebug :app:assembleDebug 2>&1 | tee build.log
-      - name: Verify APK signing certificate
+          ./gradlew --no-daemon --console=plain :app:testReleaseUnitTest :app:lintRelease :app:assembleRelease 2>&1 | tee build.log
+      - name: Verify release APK signing certificate
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs app/build/outputs/apk/debug/app-debug.apk > signing-verification.txt
+          apk=app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk" > signing-verification.txt
           expected=$(cat .github/signing-certificate.sha256)
           actual=$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signing-verification.txt)
           test "$actual" = "$expected"
           echo "Fixed APK signing certificate: $actual" >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify release APK is not debuggable
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/release/app-release.apk
+          build_tools="$ANDROID_HOME/build-tools/35.0.0"
+          if command -v apkanalyzer >/dev/null 2>&1; then
+            debuggable=$(apkanalyzer manifest debuggable "$apk" | tr -d '[:space:]')
+          elif [ -x "$build_tools/aapt" ]; then
+            # aapt v1 prints the marker line only when the flag is actually on.
+            badging=$("$build_tools/aapt" dump badging "$apk")
+            if [ -z "$badging" ]; then
+              echo "::error::cannot read the release APK badging"
+              exit 1
+            fi
+            if printf '%s\n' "$badging" | grep -q 'application-debuggable'; then
+              debuggable=true
+            else
+              debuggable=false
+            fi
+          else
+            # Last resort: a true android:debuggable serialises as 0xffffffff.
+            tree=$("$build_tools/aapt2" dump xmltree --file AndroidManifest.xml "$apk")
+            if [ -z "$tree" ]; then
+              echo "::error::cannot read the release APK manifest"
+              exit 1
+            fi
+            if printf '%s\n' "$tree" | grep -i 'debuggable' | grep -qi '0xffffffff'; then
+              debuggable=true
+            else
+              debuggable=false
+            fi
+          fi
+          case "$debuggable" in
+            false) echo "Release APK is not debuggable." >> "$GITHUB_STEP_SUMMARY" ;;
+            *) echo "::error::release APK is debuggable ($debuggable)"; exit 1 ;;
+          esac
       - name: Summarize validation
         if: always()
         shell: bash
         run: |
           python3 - <<'PY'
           import json, os, pathlib, xml.etree.ElementTree as ET
-          suites=[ET.parse(p).getroot() for p in pathlib.Path('app/build/test-results/testDebugUnitTest').glob('TEST-*.xml')]
+          suites=[ET.parse(p).getroot() for p in pathlib.Path('app/build/test-results/testReleaseUnitTest').glob('TEST-*.xml')]
           tests={key:sum(int(s.attrib.get(key,0)) for s in suites) for key in ['tests','failures','errors','skipped']}
-          lint_path=pathlib.Path('app/build/reports/lint-results-debug.xml')
+          lint_path=pathlib.Path('app/build/reports/lint-results-release.xml')
           issues=ET.parse(lint_path).getroot().findall('issue') if lint_path.exists() else []
           lint={key:sum(i.attrib.get('severity')==key for i in issues) for key in ['Error','Fatal','Warning']}
           summary={'tests':tests,'suites':len(suites),'lint':lint}
@@ -71,11 +110,11 @@ jobs:
               out.write(f"Lint: {lint['Error']+lint['Fatal']} errors, {lint['Warning']} warnings.\n")
           PY
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
+        if: success() && github.event_name != 'pull_request'
         with:
-          name: Alpha-Companion-Debug-APK
+          name: Alpha-Companion-Release-APK
           path: |
-            app/build/outputs/apk/debug/AlphaCompanion-*.apk
+            app/build/outputs/apk/release/AlphaCompanion-*.apk
             app/build/build-metadata.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4

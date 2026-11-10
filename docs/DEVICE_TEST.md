@@ -2,7 +2,7 @@
 
 ## 1. 准备工作
 
-1. 从 [GitHub Releases](https://github.com/ayatinene/Sony-Alpha-Companion/releases) 下载最新预发布版的 `AlphaCompanion-<版本>-<短SHA>-debug.apk` 安装（或从 GitHub Actions 下载 `Alpha-Companion-Debug-APK` 解压安装）。如果手机上装过早期临时签名版本，第一次换到固定签名包需要先卸载旧版（见 [SIGNING.md](SIGNING.md)）。
+1. 从 [GitHub Releases](https://github.com/ayatinene/Sony-Alpha-Companion/releases) 下载最新预发布版的 `AlphaCompanion-<版本>-<短SHA>-release.apk` 安装（或从 GitHub Actions 下载 `Alpha-Companion-Release-APK` 解压安装）。如果手机上装过早期临时签名版本，第一次换到固定签名包需要先卸载旧版（见 [SIGNING.md](SIGNING.md)）。
 2. 连接相机时应用会按需自动检查权限：Android 13 及以上首次点击连接时会请求通知权限并自动继续连接（拒绝通知权限仅影响后台扫描或下载进度提醒，连接与拍照不受影响；也可点首页或设置里的“权限设置”重新请求通知权限）。位置权限仅在“设置 → 遥控拍摄”中主动开启“为遥控照片添加手机位置”时按需请求。
 3. 关掉手机上其他正在连相机的客户端（如 Imaging Edge Mobile）以及 VPN / 代理。
 4. 在系统 Wi-Fi 设置里连接相机网络；系统弹出“当前 WLAN 无互联网访问”时选保持连接（移动数据不用关）。

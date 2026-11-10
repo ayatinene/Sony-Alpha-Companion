@@ -27,6 +27,7 @@ val gitInfo: Triple<String, String, Boolean>? = run {
 }
 val gitRevision: String = gitInfo?.let { (_, shortSha, dirty) -> if (dirty) "$shortSha-dirty" else shortSha } ?: "unknown"
 val versionedDebugApkName = "AlphaCompanion-$appVersionName-$gitRevision-debug.apk"
+val versionedReleaseApkName = "AlphaCompanion-$appVersionName-$gitRevision-release.apk"
 
 val signingPath = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
 android {
@@ -51,9 +52,19 @@ android {
                 keyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").get()
             }
         }
-        buildTypes {
-            getByName("debug") { signingConfig = signingConfigs.getByName("companion") }
-            getByName("release") { signingConfig = signingConfigs.getByName("companion") }
+    }
+    buildTypes {
+        getByName("debug") {
+            isDebuggable = true
+            if (signingPath != null) signingConfig = signingConfigs.getByName("companion")
+        }
+        getByName("release") {
+            // A real, shippable Release build: never debuggable, and R8/shrinking stay
+            // off so the published APK keeps exactly the behaviour the tests exercised.
+            isDebuggable = false
+            isMinifyEnabled = false
+            isShrinkResources = false
+            if (signingPath != null) signingConfig = signingConfigs.getByName("companion")
         }
     }
     buildFeatures { compose = true; buildConfig = true }
@@ -90,6 +101,7 @@ dependencies {
 }
 
 // Machine-readable provenance for the release workflow.
+val buildVariant = "release"
 val buildMetadataFile = layout.buildDirectory.file("build-metadata.json")
 val writeBuildMetadata = tasks.register("writeBuildMetadata") {
     val output = buildMetadataFile
@@ -98,11 +110,13 @@ val writeBuildMetadata = tasks.register("writeBuildMetadata") {
     val revisionValue = gitRevision
     val fullShaValue = gitInfo?.first.orEmpty()
     val dirtyValue = gitInfo?.third ?: false
+    val variantValue = buildVariant
     inputs.property("versionName", versionNameValue)
     inputs.property("versionCode", versionCodeValue)
     inputs.property("gitRevision", revisionValue)
     inputs.property("gitSha", fullShaValue)
     inputs.property("dirty", dirtyValue)
+    inputs.property("variant", variantValue)
     outputs.file(output)
     doLast {
         val target = output.get().asFile
@@ -114,27 +128,38 @@ val writeBuildMetadata = tasks.register("writeBuildMetadata") {
                 append("  \"versionCode\": ").append(versionCodeValue).append(",\n")
                 append("  \"gitRevision\": \"").append(revisionValue).append("\",\n")
                 append("  \"gitSha\": \"").append(fullShaValue).append("\",\n")
+                append("  \"variant\": \"").append(variantValue).append("\",\n")
                 append("  \"dirty\": ").append(dirtyValue).append("\n")
                 append("}\n")
             }
         )
     }
 }
-tasks.matching { it.name == "assembleDebug" }.configureEach { dependsOn(writeBuildMetadata) }
+tasks.matching { it.name == "assembleRelease" }.configureEach { dependsOn(writeBuildMetadata) }
 
-// Keep app-debug.apk and add a version+revision named copy for releases.
-val nameDebugApk = tasks.register("nameDebugApk") {
-    val source = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk")
-    val target = layout.buildDirectory.file("outputs/apk/debug/$versionedDebugApkName")
+// Keep the canonical app-<variant>.apk and add a version+revision named copy; CI
+// publishes only the named copy. Any copy from an earlier revision is removed first
+// and the task always re-runs, so a stale APK from a previous commit can never be
+// uploaded from a reused build directory. The Release copy is only produced from a
+// signed build (the fixed signing config), so an unsigned local release build skips it.
+fun registerNamedApkTask(taskName: String, variant: String, versionedName: String) = tasks.register(taskName) {
+    val source = layout.buildDirectory.file("outputs/apk/$variant/app-$variant.apk")
+    val target = layout.buildDirectory.file("outputs/apk/$variant/$versionedName")
     inputs.file(source)
     outputs.file(target)
+    outputs.upToDateWhen { false }
     onlyIf { source.get().asFile.isFile }
     doLast {
+        val destinationDir = target.get().asFile.parentFile
+        destinationDir?.listFiles { file -> file.isFile && file.name.startsWith("AlphaCompanion-") }?.forEach { it.delete() }
         val destination = target.get().asFile
         destination.parentFile?.mkdirs()
         source.get().asFile.copyTo(destination, overwrite = true)
     }
 }
+val nameDebugApk = registerNamedApkTask("nameDebugApk", "debug", versionedDebugApkName)
+val nameReleaseApk = registerNamedApkTask("nameReleaseApk", "release", versionedReleaseApkName)
 tasks.matching { it.name == "assembleDebug" }.configureEach { finalizedBy(nameDebugApk) }
+tasks.matching { it.name == "assembleRelease" }.configureEach { finalizedBy(nameReleaseApk) }
 
 

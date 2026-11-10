@@ -1,7 +1,7 @@
-name: Android Release
+name: Android Release Publish
 on:
   workflow_run:
-    workflows: ["Android Debug", "Android UI"]
+    workflows: ["Android Release Build", "Android UI"]
     types: [completed]
 permissions:
   contents: read
@@ -34,7 +34,7 @@ jobs:
           SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/android.yml/runs?head_sha=$SHA&per_page=50" > debug-runs.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/android.yml/runs?head_sha=$SHA&per_page=50" > build-runs.json
           gh api "repos/$GITHUB_REPOSITORY/actions/workflows/android-ui.yml/runs?head_sha=$SHA&per_page=50" > ui-runs.json
           python3 -B .github/scripts/release_metadata.py decide \
             --repository "$GITHUB_REPOSITORY" \
@@ -45,14 +45,14 @@ jobs:
             --head-repository "${{ github.event.workflow_run.head_repository.full_name }}" \
             --head-sha "$SHA" \
             --conclusion "${{ github.event.workflow_run.conclusion }}" \
-            --debug-runs debug-runs.json \
+            --build-runs build-runs.json \
             --ui-runs ui-runs.json \
             --github-output "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         if: steps.decide.outputs.decision == 'release'
         with:
-          name: Alpha-Companion-Debug-APK
-          run-id: ${{ steps.decide.outputs.debug_run_id }}
+          name: Alpha-Companion-Release-APK
+          run-id: ${{ steps.decide.outputs.build_run_id }}
           github-token: ${{ github.token }}
           path: release-artifacts
       - name: Validate build metadata against the release commit
