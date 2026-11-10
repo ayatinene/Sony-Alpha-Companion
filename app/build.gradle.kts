@@ -11,8 +11,9 @@ android {
         applicationId = "io.github.ayatinene.sonycompanion"
         minSdk = 29
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.1.6-preview"
+        versionCode = 9
+        versionName = "0.1.8-preview"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     if (signingPath != null) {
         signingConfigs {
@@ -49,6 +50,12 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.exif)
     debugImplementation(libs.compose.tooling)
+    debugImplementation(libs.compose.test.manifest)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.test)
+    androidTestImplementation(libs.test.runner)
+    androidTestImplementation(libs.test.ext)
+    androidTestImplementation(libs.mockwebserver)
     testImplementation(libs.junit)
     testImplementation(libs.json.test)
     testImplementation(libs.mockwebserver)

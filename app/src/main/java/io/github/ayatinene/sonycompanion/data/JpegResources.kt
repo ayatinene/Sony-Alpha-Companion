@@ -1,16 +1,21 @@
 package io.github.ayatinene.sonycompanion.data
 
+import java.util.Locale
+
 /** These names describe resources actually returned by ContentDirectory, not camera model promises. */
 enum class JpegSize(val title: String) {
     MAXIMUM("最大可用"), ORIGINAL("原尺寸 JPEG"), LARGE("大图"), SMALL("小图"), THUMBNAIL("缩略图")
 }
 
-private val dlnaProfile = Regex("(?:^|[:;])DLNA\\.ORG_PN=([^;:]*)", RegexOption.IGNORE_CASE)
 val Resource.isJpeg: Boolean get() = mime.substringBefore(';').trim().equals("image/jpeg", true)
     || mime.substringBefore(';').trim().equals("image/jpg", true)
 val Resource.jpegSize: JpegSize? get() {
     if (!isJpeg) return null
-    return when (dlnaProfile.find(profile)?.groupValues?.get(1)?.uppercase()) {
+    // protocolInfo is colon-separated; DLNA attributes within it are semicolon-separated.
+    // Avoid regex character classes here: Android ICU rejected the former pattern at class init.
+    val profileName=profile.split(':',';').firstOrNull { it.startsWith("DLNA.ORG_PN=",ignoreCase=true) }
+        ?.substringAfter('=')?.uppercase(Locale.ROOT)
+    return when (profileName) {
         "JPEG_ORG", "JPEG_ORIGINAL" -> JpegSize.ORIGINAL
         "JPEG_TN" -> JpegSize.THUMBNAIL
         "JPEG_SM" -> JpegSize.SMALL

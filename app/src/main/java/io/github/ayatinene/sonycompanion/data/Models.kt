@@ -10,8 +10,10 @@ enum class CameraMode(val title: String, val instruction: String) {
 }
 data class Device(val name: String, val model: String, val description: URI,
     val remote: URI? = null, val content: URI? = null, val push: URI? = null,
-    val digitalImaging: URI? = null, val identity: CameraIdentity = CameraIdentity()) {
+    val digitalImaging: URI? = null, val identity: CameraIdentity = CameraIdentity(),
+    val udn: String = "", val serial: String = "") {
     val displayName: String get() = identity.model.ifBlank { model.takeUnless { it.isBlank() || it=="SonyImagingDevice" } ?: name }
+    val cameraId: String? get() = stableCameraId(udn, serial, model)
 }
 data class CameraApplication(val name: String, val version: String)
 data class CameraIdentity(val model: String="", val firmware: String="", val lens: String="",
@@ -27,12 +29,17 @@ data class Resource(val url: String, val mime: String = "image/jpeg", val size: 
     val resolution: String = "", val profile: String = "")
 data class CameraFile(val id: String, val name: String, val resources: List<Resource> = emptyList(),
     val thumbnail: String? = null, val date: String = "", val container: Boolean = false,
-    val size: Long = 0, val raw: Boolean = false, val handle: Long? = null) {
+    val size: Long = 0, val raw: Boolean = false, val handle: Long? = null, val parent: String = "") {
     fun bestResource(): Resource? = jpegResource()
 }
 data class LocalPhoto(val uri: String, val name: String, val bytes: Long, val added: Long,
-    val origin: String, val sourceId: String, val pairKey: String = pairKey(name))
+    val origin: String, val sourceId: String, val pairKey: String = localPairKey(name,sourceId))
 fun pairKey(name: String) = name.substringBeforeLast('.').uppercase(Locale.ROOT)
+fun localPairKey(name: String, source: String): String {
+    val parts=source.split('|')
+    val directory=if(parts.size>=7) parts.take(3).joinToString("|") else source
+    return "$directory|${pairKey(name)}"
+}
 data class QueueItem(val file: CameraFile, val state: String = "等待", val received: Long = 0,
     val total: Long = file.size, val error: String? = null)
 data class AppState(val mode: CameraMode? = null, val connected: Boolean = false,
@@ -40,4 +47,4 @@ data class AppState(val mode: CameraMode? = null, val connected: Boolean = false
     val device: Device? = null, val remote: RemoteState = RemoteState(),
     val files: List<CameraFile> = emptyList(), val folder: String = "", val queue: List<QueueItem> = emptyList(),
     val transferring: Boolean = false, val local: List<LocalPhoto> = emptyList(), val logs: List<String> = emptyList(),
-    val intervalRemaining: Int = 0)
+    val intervalRemaining: Int = 0, val queueScope: String? = null, val queueNotice: String = "")

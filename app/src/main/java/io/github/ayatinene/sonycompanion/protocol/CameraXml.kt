@@ -42,7 +42,8 @@ object CameraXml {
         return Device(root.text("friendlyName").ifBlank { "Sony Camera" }, root.text("modelName"),
             location, remote, control("ContentDirectory"), control("XPushList"),
             root.all("service").firstOrNull { it.text("serviceType").contains(":DigitalImaging:") }
-                ?.text("SCPDURL")?.takeIf(String::isNotBlank)?.let(urlBase::resolve))
+                ?.text("SCPDURL")?.takeIf(String::isNotBlank)?.let(urlBase::resolve),
+            udn=root.text("UDN"), serial=root.text("serialNumber"))
     }
     fun identity(xml: String): CameraIdentity {
         val root=document(xml)

@@ -22,7 +22,7 @@ class PhotoStore(private val context: Context) {
         val records = runCatching { JSONArray(preferences.getString("records","[]")) }.getOrDefault(JSONArray())
         return (0 until records.length()).mapNotNull { i -> runCatching {
             val r=records.getJSONObject(i)
-            LocalPhoto(r.getString("uri"),r.getString("name"),r.getLong("bytes"),r.getLong("added"),r.getString("origin"),r.getString("source"),r.optString("pair",pairKey(r.getString("name"))))
+            LocalPhoto(r.getString("uri"),r.getString("name"),r.getLong("bytes"),r.getLong("added"),r.getString("origin"),r.getString("source"))
         }.getOrNull() }.sortedByDescending { it.added }
     }
     private fun writeRecords(records: List<LocalPhoto>) {
@@ -83,6 +83,19 @@ class PhotoStore(private val context: Context) {
     suspend fun preview(photo: LocalPhoto): Bitmap? = withContext(Dispatchers.IO) {
         runCatching { resolver.loadThumbnail(Uri.parse(photo.uri),android.util.Size(400,400),null) }.getOrNull()
             ?: runCatching { resolver.openInputStream(Uri.parse(photo.uri))!!.use { ExifInterface(it).thumbnailBitmap } }.getOrNull()
+    }
+    suspend fun fullPreview(photo: LocalPhoto): Bitmap? = withContext(Dispatchers.IO) {
+        val display=if(photo.name.endsWith(".arw",true)) list().firstOrNull {
+            it.pairKey==photo.pairKey && (it.name.endsWith(".jpg",true) || it.name.endsWith(".jpeg",true)) && exists(it)
+        } ?: photo else photo
+        if(display.name.endsWith(".arw",true)) {
+            runCatching { resolver.openInputStream(Uri.parse(display.uri))?.use { ExifInterface(it).thumbnailBitmap } }.getOrNull()
+                ?: preview(display)
+        } else PreviewBitmap.decode { requireNotNull(resolver.openInputStream(Uri.parse(display.uri))) { "文件已移除" } }
+    }
+    @Synchronized fun deleteFile(photo: LocalPhoto) {
+        resolver.delete(Uri.parse(photo.uri),null,null)
+        removeRecord(photo)
     }
     @Synchronized fun removeRecord(photo: LocalPhoto) = writeRecords(list().filter { it.uri!=photo.uri })
     @Synchronized fun pruneMissing(): List<LocalPhoto> {
