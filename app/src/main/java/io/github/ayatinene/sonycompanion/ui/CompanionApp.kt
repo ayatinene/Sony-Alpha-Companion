@@ -154,6 +154,7 @@ private fun connectionSubtitle(state:AppState):String=when {
     var description by remember { mutableStateOf(c.prefs.getString("description","").orEmpty()) }
     var host by remember { mutableStateOf(c.prefs.getString("computerHost","").orEmpty()) }
     var guid by remember { mutableStateOf(c.prefs.getString("guid","").orEmpty()) }
+    var sonySleep by remember { mutableStateOf(c.prefs.getBoolean(SONY_SLEEP_ON_DISCONNECT,false)) }
     var saved by remember { mutableStateOf(false) }
     var logLevel by remember { mutableStateOf(c.journal.minimum) }
     var logMenu by remember { mutableStateOf(false) }
@@ -178,6 +179,7 @@ private fun connectionSubtitle(state:AppState):String=when {
         item { Button(onClick={c.prefs.edit().putString("description",description.trim()).putString("computerHost",host.trim()).putString("guid",guid.trim()).apply();saved=true},shape=shape){Text(if(saved) "已保存" else "保存连接设置")} }
         item { OutlinedButton(onClick={usbInfo=c.usbStatus();registerUsb=true},enabled=!state.connected&&!state.busy&&!state.transferring,shape=shape) { Icon(Icons.Outlined.Usb,null);Spacer(Modifier.width(8.dp));Text("USB OTG 登记接收端 · 实验性") } }
         item { Text("相机 USB 连接选择“海量存储”，通过数据线和 OTG 连接手机后登记。成功后拔下 USB，再连接 Wi-Fi 使用原文件传输。",style=MaterialTheme.typography.bodySmall) }
+        item { SonySleepSetting(sonySleep){ enabled->sonySleep=enabled;c.prefs.edit().putBoolean(SONY_SLEEP_ON_DISCONNECT,enabled).apply() } }
         item { TextButton(onClick=permissions){Text("申请附近设备与通知权限")} }
         item { HorizontalDivider() }
         item { Text("存储与诊断",style=MaterialTheme.typography.titleMedium) }

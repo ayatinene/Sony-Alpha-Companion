@@ -59,6 +59,29 @@ public class PtpSession {
         if (!response.isSuccess()) throw new PtpExceptions.OperationFailed("SonyStartTransferAck", response.getResponseCode());
     }
 
+    // Experimental "return to sleep" DATA_OUT body (19 bytes, little-endian), taken from the airmtp
+    // reference (commit e69609c). Deliberately separate from the 21-byte start payload above; only
+    // this exact byte sequence is used, never a libgphoto 16-byte variant.
+    private static final byte[] SONY_SLEEP_PAYLOAD = new byte[]{
+            0,0,0,0, 5,0,0,0, 0,0,0,0, 0,0,0,0, 2,0, 0x30};
+
+    /**
+     * Sony "Send to Computer" sleep pair: 0x9280 (DATA_OUT, parameter 4) carrying the 19-byte sleep
+     * body, then 0x9281 (DATA_IN, parameter 4) whose data and OK response are read in full. Each
+     * step must succeed; the caller pairs this with CloseSession under the same transaction lock.
+     */
+    public void sonySleep() throws PtpTransport.TransportError, PtpExceptions.PtpProtocolViolation, PtpExceptions.OperationFailed {
+        PtpOperation.Request set = PtpOperation.createRequest(0x9280);
+        set.setParameters(new long[]{4});
+        PtpDataType.Object data = new PtpDataType.Object(); data.mObject = SONY_SLEEP_PAYLOAD;
+        set.setDataObject(data);
+        PtpOperation.Response response = mSession.executeTransaction(set); response.validate();
+        if (!response.isSuccess()) throw new PtpExceptions.OperationFailed("SonySleep", response.getResponseCode());
+        PtpOperation.Request get = PtpOperation.createRequest(0x9281); get.setParameters(new long[]{4});
+        response = mSession.executeTransaction(get); response.validate();
+        if (!response.isSuccess()) throw new PtpExceptions.OperationFailed("SonySleepAck", response.getResponseCode());
+    }
+
 
     public PtpDataType.StorageID[] getStorageIDs() throws PtpTransport.TransportError, PtpExceptions.PtpProtocolViolation, PtpExceptions.OperationFailed {
         PtpOperation.Response response = mSession.executeTransaction(PtpOperation.createRequest(PtpOperation.OPSCODE_GetStorageIDs));

@@ -96,6 +96,11 @@ public class PtpIpDiagnosticsTest {
                         else if (op == 0x1009) result(command.getOutputStream(), tx, jpeg);
                         else throw new AssertionError("Unexpected operation " + op);
                     }
+                    // Hold the event channel open until the client tears the connection down.
+                    // Closing it here would race the CloseSession response and turn a confirmed
+                    // close into a spurious transport EOF (the peer keeps the event socket open
+                    // during the CloseSession handshake; see PtpIpConnectAndCloseTest).
+                    while (event.getInputStream().read() != -1) { }
                 }
             } catch (Exception e) {
                 throw new RuntimeException(e);

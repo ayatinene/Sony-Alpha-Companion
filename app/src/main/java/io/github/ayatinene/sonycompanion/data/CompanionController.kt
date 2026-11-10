@@ -22,7 +22,12 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 class CompanionController(private val context: Context) {
-    companion object { private const val SERVICE_READY_TIMEOUT_MILLIS = 5_000L }
+    companion object {
+        private const val SERVICE_READY_TIMEOUT_MILLIS = 5_000L
+        private const val INIT_FINISH_TIMEOUT_MILLIS = 4_000L
+        private const val SESSION_END_TIMEOUT_MILLIS = 4_000L
+        private const val SONY_SLEEP_PREF = "sonySleepOnDisconnect"
+    }
     val prefs = context.getSharedPreferences("settings",Context.MODE_PRIVATE)
     val photos = PhotoStore(context)
     private val queues=TransferQueueStore(java.io.File(context.filesDir,"transfer-queues.json"))
@@ -49,7 +54,22 @@ class CompanionController(private val context: Context) {
     private val identity = SessionIdentity()
     @Volatile private var userScanPaused = false
     private val readiness = ReadinessLatch()
-    private val pendingConnection = PendingResources()
+    /** Abort handles for the connection attempt currently in flight. Replaced per attempt so an old
+     * attempt's cleanup can never release a newer attempt's resources. */
+    private var pendingConnection = PendingResources()
+    /** Session-bound control jobs, cancelled before a disconnect/cancel joins anything. */
+    private val sessionActions = SessionActions()
+    /** Test seam: when set, connect() uses this transport and device list instead of Wi-Fi discovery.
+     * Null in production. */
+    class SessionOverride(val transport: CameraHttp, val devices: List<Device>)
+    var sessionOverride: SessionOverride? = null
+    /** Immutable snapshot of one session's generation, resources and jobs, taken atomically under the
+     * identity lock before any suspension, so cleanup only ever touches the session it detached. */
+    private class DetachedSession(
+        val gen: Long, val snapshot: AppState,
+        val http: CameraHttp?, val computer: ComputerTransfer?, val smartphone: SmartphoneTransfer?, val remote: RemoteCamera?,
+        val queue: Job?, val identity: Job?, val scan: Job?, val monitoring: List<Job>, val monitoringStop: Job?,
+        val ownConnection: Job?, val attempt: PendingResources, val actions: List<Job>, val effectiveGraceful: Boolean)
     private val backgroundActive = MutableStateFlow(false)
     /** True while any scan or download holds a background lease. The service observes this instead of
      * inferring from scan/transferring, so a pending start is never torn down before it becomes ready. */
@@ -233,22 +253,29 @@ class CompanionController(private val context: Context) {
     fun cancelBackgroundWork() {
         val snapshot=state.value
         log("取消后台任务 scan=${snapshot.scan.phase} transferring=${snapshot.transferring}",LogLevel.INFO,"FGS")
-        nextGeneration()
-        scanJob?.cancel(); scanJob=null
-        queueJob?.cancel()
-        userScanPaused=false
-        // Cancel a connection enumeration and unblock every blocking PTP/HTTP call it or the live
-        // session may be stuck in, not just the computer transport.
-        connectionJob?.let { if(it.isActive) it.cancel() }
-        pendingConnection.abortAll(); pendingConnection.clear()
+        // Forced: detachSession closes the transports before cancelling monitoring, so no cleanup RPC
+        // is sent, then we join only the detached jobs.
+        val d=detachSession(snapshot,null,gracefulRequested=false)
+        runCatching { d.attempt.abortAll() }
         val cancelled=snapshot.scan.copy(phase=ScanPhase.Failed,error="已取消",paused=false)
         val queue=snapshot.queue.map { if(it.state in listOf("等待","传输中")) it.copy(state="已取消") else it }
-        val transfer=computer; val liveHttp=http
-        computer=null; http=null
-        scope.launch(Dispatchers.IO) { runCatching { transfer?.abort() }; runCatching { liveHttp?.close() } }
-        update { copy(connected=false,transferring=false,scan=cancelled,queue=queue,
-            message=if(snapshot.mode==CameraMode.COMPUTER) "已取消，原文件会话已断开，请重新连接" else "已取消后台任务") }
+        // Clear busy/connecting too: the cancelled connect job's own finally is generation-guarded and
+        // would otherwise skip, leaving the UI stuck busy forever.
+        whenGeneration(d.gen) { update { copy(connected=false,connecting=false,busy=false,transferring=false,scan=cancelled,queue=queue,
+            remote=RemoteState(),intervalRemaining=0,
+            message=if(snapshot.mode==CameraMode.COMPUTER) "已取消，原文件会话已断开，请重新连接" else "已取消后台任务") } }
         background.reset("cancel")
+        scope.launch(Dispatchers.IO) {
+            withContext(NonCancellable) {
+                runCatching { sessionActions.join(d.actions) }
+                runCatching { d.scan?.join() }
+                runCatching { d.queue?.join() }
+                runCatching { d.identity?.join() }
+                runCatching { d.monitoring.joinAll() }
+                runCatching { d.monitoringStop?.join() }
+                whenGeneration(d.gen) { frameState.value=null }
+            }
+        }
     }
     fun usbStatus(): String = UsbGuidRegistrar(context).description().also {
         lastUsbDescription=it; log(it,LogLevel.DEBUG,"USB")
@@ -276,13 +303,20 @@ class CompanionController(private val context: Context) {
             try {
                 disconnect()
                 gen = identity.currentGeneration
+                val attempt = PendingResources()
+                pendingConnection = attempt
+                var remoteAttempt: RemoteCamera? = null
+                var smartphoneAttempt: SmartphoneTransfer? = null
                 update { copy(connecting=true,mode=mode,busy=true,message="查找相机…",error=null,files=emptyList(),remote=RemoteState(),scan=ScanState()) }
                 log("开始连接 mode=$mode",tag="CONNECT")
                 try {
+                    // Test seam: a local transport + device list lets lifecycle tests drive a real
+                    // controller against a local server without a camera or Wi-Fi.
+                    val testOverride=sessionOverride
                     val networks = CameraNetwork(context)
-                    val network = networks.wifi(); selectedNetwork=network
+                    val network = if(testOverride==null) networks.wifi() else null; selectedNetwork=network
                     log("绑定 Wi-Fi network=$network",LogLevel.DEBUG,"CONNECT")
-                    val transport = CameraHttp(network,trace={ label,response ->
+                    val transport = testOverride?.transport ?: CameraHttp(network,trace={ label,response ->
                         synchronized(protocolResponses) {
                             if(protocolResponses.size>=30 && label !in protocolResponses) protocolResponses.remove(protocolResponses.keys.first())
                             protocolResponses[label]=response.take(200_000)
@@ -291,72 +325,121 @@ class CompanionController(private val context: Context) {
                     },report={level,message,error->log(message,level,"HTTP",error)})
                     // Register the real closer so an external disconnect can unblock the blocking
                     // PTP/HTTP calls even though cancelling a coroutine cannot interrupt them.
-                    pendingConnection.register { transport.close() }
-                    if(identity.currentGeneration!=gen) { transport.close(); return@launch }
+                    attempt.register { transport.close() }
+                    if(identity.currentGeneration!=gen) { attempt.abortAll(); return@launch }
                     if(mode==CameraMode.COMPUTER) {
+                        require(testOverride==null) { "测试覆盖不支持原文件模式" }
+                        val computerNetwork=requireNotNull(network) { "尚未连接 Wi-Fi" }
                         val guid=prefs.getString("guid","").orEmpty()
                         ComputerTransfer.parseGuid(guid)
                         val host=prefs.getString("computerHost","").orEmpty().trim().ifBlank {
-                            val devices=networks.discover(network,transport,false,"",computer=true)
+                            val devices=networks.discover(computerNetwork,transport,false,"",computer=true)
                             require(devices.size==1) {
                                 if(devices.isEmpty()) "未找到相机，请检查与相机是否在同一局域网，或在设置填写相机 IP。"
                                 else "发现多个相机，请在设置中填写目标相机 IP。"
                             }
                             devices.single().description.host
                         }
-                        val transfer=ComputerTransfer(network) { level,message,error -> log(message,level,"PTP",error) }
-                        pendingConnection.register { transfer.abort() }
+                        val transfer=ComputerTransfer(computerNetwork) { level,message,error -> log(message,level,"PTP",error) }
+                        attempt.register { transfer.abort() }
                         val model=transfer.connect(host,guid)
-                        if(identity.currentGeneration!=gen) { transfer.abort(); transport.close(); return@launch }
+                        if(identity.currentGeneration!=gen) { attempt.abortAll(); return@launch }
                         val device=Device(model,model,java.net.URI("http://$host"),serial=transfer.serial,
                             identity=CameraIdentity(model=model,firmware=transfer.firmware))
-                        http=transport; computer=transfer; pendingConnection.clear()
-                        attachQueue(device,mode)
+                        if(whenGeneration(gen) { http=transport; computer=transfer; true } != true) { attempt.abortAll(); return@launch }
+                        attachQueue(device,mode,gen)
                         if(identity.currentGeneration!=gen) {
-                            transfer.abort(); transport.close()
+                            attempt.abortAll()
                             if(computer===transfer) computer=null
                             if(http===transport) http=null
                             return@launch
                         }
-                        whenGeneration(gen) { update { copy(device=device,connected=true,files=emptyList(),scan=ScanState(ScanPhase.Scanning),message="已连接 · 正在读取相机文件…") } }
+                        val published=whenGeneration(gen) {
+                            update { copy(device=device,connected=true,files=emptyList(),scan=ScanState(ScanPhase.Scanning),message="已连接 · 正在读取相机文件…") }
+                            attempt.release()
+                            true
+                        }
+                        if(published!=true) {
+                            attempt.abortAll()
+                            if(computer===transfer) computer=null
+                            if(http===transport) http=null
+                            return@launch
+                        }
                         log("原文件会话已建立，开始后台扫描 generation=$gen",tag="CONNECT")
                         startScan()
                     } else {
-                        val devices = networks.discover(network,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
-                        if(identity.currentGeneration!=gen) { transport.close(); return@launch }
+                        val devices = testOverride?.devices
+                            ?: networks.discover(network!!,transport,mode==CameraMode.REMOTE,prefs.getString("description","").orEmpty().trim())
+                        if(identity.currentGeneration!=gen) { attempt.abortAll(); return@launch }
                         require(devices.size==1) {
                             if(devices.isEmpty()) "没有发现相机。请确认相机工作模式、Wi-Fi 和附近设备权限，或在设置填写描述文件 URL。"
                             else "发现多个相机，请在设置填写目标相机的描述文件 URL"
                         }
                         val device=devices.single(); log("发现 ${device.model} ${device.description} remote=${device.remote} content=${device.content} push=${device.push}",tag="CONNECT")
-                        attachQueue(device,mode)
-                        if(identity.currentGeneration!=gen) { transport.close(); return@launch }
-                        http=transport; pendingConnection.clear()
-                        update { copy(device=device) }
+                        attachQueue(device,mode,gen)
+                        if(identity.currentGeneration!=gen) { attempt.abortAll(); return@launch }
+                        if(whenGeneration(gen) { http=transport; true } != true) { attempt.abortAll(); return@launch }
+                        whenGeneration(gen) { update { copy(device=device) } }
                         if(mode==CameraMode.REMOTE) {
-                            val camera=RemoteCamera(requireNotNull(device.remote).toString(),transport) { message -> log(message,if(message.startsWith("RPC"))LogLevel.DEBUG else LogLevel.WARN,"RPC") }; remote=camera
+                            var cameraRef: RemoteCamera? = null
+                            val camera=RemoteCamera(requireNotNull(device.remote).toString(),transport,
+                                stillOwned={ remote===cameraRef }) { message -> log(message,if(message.startsWith("RPC"))LogLevel.DEBUG else LogLevel.WARN,"RPC") }
+                            cameraRef=camera; remoteAttempt=camera
+                            if(whenGeneration(gen) { remote=camera; true } != true) { attempt.abortAll(); return@launch }
                             val capabilities=camera.initialize()
-                            update { copy(connected=true,remote=capabilities,message="遥控已连接 · ${device.displayName}") }
+                            val published=whenGeneration(gen) {
+                                update { copy(connected=true,remote=capabilities,message="遥控已连接 · ${device.displayName}") }
+                                attempt.release()
+                                true
+                            }
+                            if(published!=true) {
+                                attempt.abortAll()
+                                if(remote===camera) remote=null
+                                if(http===transport) http=null
+                                return@launch
+                            }
                             log("遥控连接成功 application=${capabilities.application} eventVersion=${capabilities.eventVersion} apis=${capabilities.apis.sorted()}",tag="CONNECT")
                             startMonitoring()
                         } else {
-                            val transfer=SmartphoneTransfer(device,transport) { log(it,LogLevel.WARN,"BROWSE") }; smartphone=transfer
+                            val transfer=SmartphoneTransfer(device,transport) { log(it,LogLevel.WARN,"BROWSE") }
+                            smartphoneAttempt=transfer
+                            if(whenGeneration(gen) { smartphone=transfer; true } != true) { attempt.abortAll(); return@launch }
                             val files=transfer.initialize()
-                            update { copy(connected=true,files=files,folder=transfer.rootId,message="已连接 · JPEG 传输") }
+                            val published=whenGeneration(gen) {
+                                update { copy(connected=true,files=files,folder=transfer.rootId,message="已连接 · JPEG 传输") }
+                                attempt.release()
+                                true
+                            }
+                            if(published!=true) {
+                                attempt.abortAll()
+                                if(smartphone===transfer) smartphone=null
+                                if(http===transport) http=null
+                                return@launch
+                            }
                             log("JPEG 连接成功 root=${transfer.rootId} entries=${files.size}",tag="CONNECT")
                         }
                         loadIdentity(device,transport)
                     }
                 } catch(e: CancellationException) {
-                    // Cancelled mid-enumeration: release anything we created so nothing leaks. A newer
-                    // generation means an external disconnect already owns the cleanup.
-                    withContext(NonCancellable+Dispatchers.IO) { pendingConnection.abortAll(); pendingConnection.clear() }
+                    // Cancelled mid-initialization: abort this attempt's own transport to unblock the
+                    // blocking call before the caller joins.
+                    withContext(NonCancellable+Dispatchers.IO) { attempt.abortAll() }
                     whenGeneration(gen) { computer=null; http=null; smartphone=null; remote=null }
                     throw e
                 }
                 catch(e: Exception) {
                     log("连接失败：${e.message}",LogLevel.ERROR,"CONNECT",e)
-                    withContext(Dispatchers.IO) { pendingConnection.abortAll(); pendingConnection.clear() }
+                    // Normal initialization error: end only the local resources this attempt created,
+                    // never a global reference read across dispatchers, and only while this attempt is
+                    // still the live generation.
+                    val owns=identity.currentGeneration==gen
+                    withContext(NonCancellable+Dispatchers.IO) {
+                        if(owns) {
+                            runCatching { withTimeout(INIT_FINISH_TIMEOUT_MILLIS) { remoteAttempt?.finish(); smartphoneAttempt?.finish() } }
+                                .onFailure { log("初始化失败后结束会话：${it.message}",LogLevel.WARN,"CONNECT",it) }
+                        }
+                        attempt.abortAll()
+                    }
                     // Never let a superseded connect overwrite a newer session's state.
                     whenGeneration(gen) {
                         computer=null; http=null; smartphone=null; remote=null
@@ -369,15 +452,21 @@ class CompanionController(private val context: Context) {
         }
         return true
     }
-    private suspend fun attachQueue(device: Device, mode: CameraMode) {
+    /**
+     * Reads and publishes the saved queue for [gen] atomically: a superseded attempt must not publish
+     * a queue into a newer session. The identity-unknown / recovery notices only apply to the gallery
+     * transfer modes (JPEG / COMPUTER); remote capture has no gallery to resume.
+     */
+    private suspend fun attachQueue(device: Device, mode: CameraMode, gen: Long) {
         val key=queueScope(device,mode)
         val saved=withContext(Dispatchers.IO) { runCatching { queues.load(key) }.onFailure {
             log("读取下载队列：${it.message}",LogLevel.WARN,"QUEUE",it)
         }.getOrDefault(emptyList()) }
-        update { copy(queueScope=key,queue=saved,queueNotice=if(device.cameraId==null)
-            "无法确认相机身份，重连后需重新选择下载文件。" else
-            if(saved.any { it.state !in setOf("完成","已存在") }) "已恢复未完成的下载，继续前会重新确认文件。" else "") }
-        log("相机队列 camera=${device.displayName} identified=${device.cameraId!=null} entries=${saved.size}",tag="QUEUE")
+        val notice=if(mode==CameraMode.REMOTE) "" else
+            if(device.cameraId==null) "无法确认相机身份，重连后需重新选择下载文件。"
+            else if(saved.any { it.state !in setOf("完成","已存在") }) "已恢复未完成的下载，继续前会重新确认文件。" else ""
+        whenGeneration(gen) { update { copy(queueScope=key,queue=saved,queueNotice=notice) } }
+        log("相机队列 camera=${device.displayName} mode=$mode identified=${device.cameraId!=null} entries=${saved.size}",tag="QUEUE")
     }
     private fun loadIdentity(device: Device, transport: CameraHttp) {
         val uri=device.digitalImaging ?: return
@@ -397,33 +486,39 @@ class CompanionController(private val context: Context) {
     private fun startMonitoring() {
         val camera=remote?:return
         if(!visible || eventJob?.isActive==true) return
+        val gen=state.value.sessionGeneration
+        val transport=http
         eventJob=scope.launch {
             var failures=0
             while(isActive) {
                 try {
                     val (status,urls)=camera.events(); failures=0
-                    update { copy(remote=status) }
-                    urls.forEach(::importPostview)
+                    // Never publish an old session's event result or enqueue its postviews into a newer one.
+                    whenGeneration(gen) { if(remote===camera) update { copy(remote=status) } }
+                    urls.forEach { importPostview(it,gen) }
                 } catch(e: CancellationException) { throw e }
                 catch(e: Exception) {
                     failures++; log("状态查询失败 attempt=$failures：${e.message}",LogLevel.WARN,"EVENT",e)
-                    if(failures>=3) { update { copy(error="状态查询失败，请检查连接并重连") }; break }
+                    if(failures>=3) { whenGeneration(gen) { if(remote===camera) update { copy(error="状态查询失败，请检查连接并重连") } }; break }
                 }
                 delay(900)
             }
         }
-        if("startLiveview" in state.value.remote.apis) liveJob=scope.launch(Dispatchers.IO) {
+        if("startLiveview" in state.value.remote.apis && transport!=null) liveJob=scope.launch(Dispatchers.IO) {
             var attempts=0
             while(isActive && attempts<3) {
                 try {
                     val url=camera.liveView()
-                    requireNotNull(http).stream(url) {
+                    transport.stream(url) {
                         val reader=LiveViewReader(requireNotNull(it.body).byteStream())
                         var frames=0L;var bytesRead=0L;var reported=System.nanoTime()
                         while(isActive) {
                             val bytes=reader.next()?:error("实时取景流结束")
                             val image=BitmapFactory.decodeByteArray(bytes,0,bytes.size)?:continue
-                            frameState.value=image
+                            // Check and publish the frame under the same identity lock so a newer
+                            // session's frame is never overwritten by an old one.
+                            val owned=whenGeneration(gen) { if(remote!==camera) false else { frameState.value=image; true } }
+                            if(owned!=true) break
                             frames++;bytesRead+=bytes.size
                             if(frames==1L) log("实时取景首帧 ${image.width}x${image.height}",tag="LIVEVIEW")
                             val now=System.nanoTime()
@@ -441,7 +536,7 @@ class CompanionController(private val context: Context) {
                     }
                 }
             }
-            if(attempts>=3) update { copy(error="实时取景已停止，请重连相机") }
+            if(attempts>=3) whenGeneration(gen) { if(remote===camera) update { copy(error="实时取景已停止，请重连相机") } }
         }
     }
     private fun stopMonitoring(): List<Job> {
@@ -464,112 +559,192 @@ class CompanionController(private val context: Context) {
             monitoringStop=scope.launch { jobs.joinAll() }
         }
     }
-    suspend fun disconnect(finish: Boolean = true) {
+    /** Detaches the live session. Only pure field capture, generation bump and state clearing happen
+     * under the identity lock; every actual abort/close/cancel runs outside it, so no synchronous
+     * callback can run while the lock is held. A forced detach closes the transports before cancelling
+     * the monitoring jobs, and marks the remote so a live-view finally cannot send a cleanup RPC.
+     * `effectiveGraceful` is false whenever a control action is still in flight (a cancelled capture
+     * does not mean the camera stopped, so no record-mode cleanup is sent). */
+    private fun detachSession(snapshot: AppState, self: Job?, gracefulRequested: Boolean): DetachedSession {
+        val detached = identity.locked {
+            val gen=nextGeneration()
+            val actions=sessionActions.detach()
+            val oldHttp=http; val oldComputer=computer; val oldSmartphone=smartphone; val oldRemote=remote
+            val oldQueue=queueJob; val oldIdentity=identityJob; val oldScan=scanJob
+            val monitoring=listOfNotNull(liveJob,eventJob,intervalJob)
+            liveJob=null; eventJob=null; intervalJob=null
+            val monitoringStopJob=monitoringStop
+            val ownConnection=connectionJob?.takeIf { it.isActive && it!==self }
+            val attempt=pendingConnection; pendingConnection=PendingResources()
+            val graceful=gracefulRequested && actions.isEmpty()
+            if(!graceful) oldRemote?.disallowCleanup()
+            userScanPaused=false
+            computer=null; remote=null; smartphone=null; http=null; selectedNetwork=null
+            update { copy(connected=false,connecting=false,busy=false,transferring=false,scan=ScanState()) }
+            DetachedSession(gen,snapshot,oldHttp,oldComputer,oldSmartphone,oldRemote,oldQueue,oldIdentity,oldScan,monitoring,monitoringStopJob,ownConnection,attempt,actions,graceful)
+        }
+        if(!detached.effectiveGraceful) {
+            runCatching { detached.computer?.abort() }
+            runCatching { detached.http?.close() }
+        }
+        detached.actions.forEach { it.cancel() }
+        detached.scan?.cancel()
+        detached.queue?.cancel()
+        detached.identity?.cancel()
+        detached.ownConnection?.cancel()
+        detached.monitoring.forEach { it.cancel() }
+        return detached
+    }
+    suspend fun disconnect(finish: Boolean = true, allowSonySleep: Boolean = false) {
         val snapshot=state.value
-        log("断开开始 finish=$finish connected=${snapshot.connected}",LogLevel.DEBUG,"CONNECT")
-        nextGeneration()
-        scanJob?.cancel(); scanJob=null
-        userScanPaused=false
-        // Cancel a connection enumeration started elsewhere. Never cancel our own connectionJob when
-        // connect() calls disconnect() internally.
+        log("断开开始 finish=$finish allowSonySleep=$allowSonySleep connected=${snapshot.connected}",LogLevel.DEBUG,"CONNECT")
         val self=coroutineContext[Job]
-        val ownConnection=connectionJob?.takeIf { it.isActive && it!==self }
-        ownConnection?.cancel()
-        // Unblock resources created by an in-flight connect before joining: cancelling a coroutine
-        // cannot interrupt a blocking PTP/HTTP call, so abort/close them explicitly first.
-        withContext(NonCancellable+Dispatchers.IO) { pendingConnection.abortAll(); pendingConnection.clear() }
+        val d=detachSession(snapshot,self,gracefulRequested=finish)
+        runCatching { d.attempt.abortAll() }
         background.reset("disconnect")
-        update { copy(connected=false,connecting=false,transferring=false,scan=ScanState()) }
         if(snapshot.device!=null) { lastDevice=snapshot.device; lastRemote=snapshot.remote; lastMode=snapshot.mode }
-        // Unblock any in-flight PTP/HTTP transaction before joining, so cancel/stop never waits for
-        // the 65s socket timeout. A graceful close is only attempted when nothing is mid-transaction.
-        val busy=snapshot.transferring || snapshot.scan.phase==ScanPhase.Scanning
-        val oldHttp=http; val oldComputer=computer; val oldSmartphone=smartphone
-        computer=null; remote=null; smartphone=null; http=null; selectedNetwork=null
-        if(busy) {
-            runCatching { oldComputer?.abort() }.onFailure { log("中止原文件会话：${it.message}",LogLevel.WARN,"CONNECT",it) }
-            // Close HTTP before joining the queue so a blocked HTTP download unblocks immediately.
-            runCatching { oldHttp?.close() }
+        if(d.ownConnection!=null) {
+            runCatching { d.http?.close() }
+            d.ownConnection.join()
         }
-        if(ownConnection!=null) {
-            // A cancelled connect may already have promoted resources to the live fields.
-            runCatching { oldHttp?.close() }
-            ownConnection.join()
-        }
-        queueJob?.cancelAndJoin(); queueJob=null
-        state.value.let { current -> current.queueScope?.let { key -> withContext(Dispatchers.IO) {
-            // Normalise a mid-flight item back to waiting so a reconnect can resume it.
-            val resumable=current.queue.map { if(it.state=="传输中") it.copy(state="等待",received=0) else it }
+        // Persist the interrupted queue from the snapshot, never from a newer session's state.
+        snapshot.queueScope?.let { key -> withContext(Dispatchers.IO) {
+            val resumable=snapshot.queue.map { if(it.state=="传输中") it.copy(state="等待",received=0) else it }
             runCatching { queues.save(key,resumable) }.onFailure { log("保存断开队列：${it.message}",LogLevel.WARN,"QUEUE",it) }
-        } } }
-        identityJob?.cancelAndJoin(); identityJob=null
-        stopMonitoring().joinAll(); monitoringStop?.join(); frameState.value=null
+        } }
+        // Join only the jobs this session detached, never a newer session's actions. HTTP jobs are
+        // released by cancellation, so these joins are bounded and no live-view finally can race the
+        // end sequence below.
+        sessionActions.join(d.actions,self)
+        d.identity?.join()
+        d.monitoring.joinAll()
+        d.monitoringStop?.join()
+        whenGeneration(d.gen) { frameState.value=null }
+        // Run the end sequence before joining scan/queue: the PTP finish's idle gate aborts a blocking
+        // scan, which unblocks the joins without relying on coroutine cancellation. A non-graceful
+        // detach sends no RPC.
+        val sleepCamera = d.effectiveGraceful && allowSonySleep && prefs.getBoolean(SONY_SLEEP_PREF,false)
         withContext(NonCancellable+Dispatchers.IO) {
-            if(finish && !busy) {
-                try { withTimeout(4000) { oldSmartphone?.finish(); oldComputer?.finish() } }
-                catch(e: Exception) { log("结束会话：${e.message}",LogLevel.WARN,"CONNECT",e) }
-            }
-            runCatching { oldComputer?.abort() }.onFailure { log("关闭原文件会话：${it.message}",LogLevel.WARN,"CONNECT",it) }
-            oldHttp?.close()
+            SessionEndSequence(SESSION_END_TIMEOUT_MILLIS).run(listOf(
+                SessionEndSequence.Step("remote") { if(d.effectiveGraceful) d.remote?.finish() },
+                SessionEndSequence.Step("smartphone") { if(d.effectiveGraceful) d.smartphone?.finish() },
+                SessionEndSequence.Step("computer") { if(d.effectiveGraceful) d.computer?.finish(sleepCamera=sleepCamera) },
+            )) { step, e -> log("结束会话 ${step.name}：${e.message}",LogLevel.WARN,"CONNECT",e) }
+            runCatching { d.computer?.abort() }
         }
-        thumbs.evictAll(); importedUrls.clear()
-        update { copy(connected=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") }
+        d.scan?.join()
+        d.queue?.join()
+        d.http?.close()
+        whenGeneration(d.gen) { thumbs.evictAll(); importedUrls.clear() }
+        whenGeneration(d.gen) { update { copy(connected=false,files=emptyList(),device=null,remote=RemoteState(),intervalRemaining=0,message="已断开") } }
         log("断开完成",LogLevel.DEBUG,"CONNECT")
     }
-    fun endSession() { if(!state.value.transferring) action { disconnect() } }
-    private fun action(block: suspend ()->Unit) { scope.launch {
-        try { block() } catch(e: CancellationException) { throw e } catch(e: Exception) { log(e.message.orEmpty(),LogLevel.ERROR,"ACTION",e); update { copy(error=e.message) } }
-    } }
-    fun setSetting(key:String,value:String) = action {
+    fun endSession() {
+        if(state.value.transferring) return
+        // A plain (untracked) job: disconnect must never cancel/join itself.
+        scope.launch {
+            try { disconnect(allowSonySleep=true) } catch(e: CancellationException) { throw e }
+            catch(e: Exception) { log(e.message.orEmpty(),LogLevel.ERROR,"ACTION",e); update { copy(error=e.message) } }
+        }
+    }
+    private fun action(block: suspend ()->Unit) {
+        sessionAction(state.value.sessionGeneration,block)
+    }
+    /** Control helper: the job is tracked (LAZY) before it starts, so a disconnect between creation
+     * and start still cancels it, and the caller must have captured the camera/transfer and [gen]. */
+    private fun sessionAction(gen: Long, block: suspend ()->Unit) {
+        val job=scope.launch(start=CoroutineStart.LAZY) {
+            try { block() } catch(e: CancellationException) { throw e }
+            catch(e: Exception) { log(e.message.orEmpty(),LogLevel.ERROR,"ACTION",e); whenGeneration(gen) { update { copy(error=e.message) } } }
+        }
+        sessionActions.track(job)
+        job.start()
+    }
+    fun setSetting(key:String,value:String) {
+        val gen=state.value.sessionGeneration
+        val camera=remote ?: return
         log("设置 $key=$value",tag="CONTROL")
-        val camera=requireNotNull(remote); camera.set(key,value)
-        val refreshed=camera.refresh()
-        update { copy(remote=refreshed) }
+        sessionAction(gen) {
+            if(!ownsCamera(camera,gen)) return@sessionAction
+            camera.set(key,value)
+            if(!ownsCamera(camera,gen)) return@sessionAction
+            val refreshed=camera.refresh()
+            whenGeneration(gen) { if(remote===camera) update { copy(remote=refreshed) } }
+        }
     }
-    fun focus() = action { requireNotNull(remote).focus() }
-    fun movie() = action {
-        val camera=requireNotNull(remote)
-        camera.movie(!state.value.remote.status.contains("MovieRecording",true))
+    fun focus() {
+        val gen=state.value.sessionGeneration
+        val camera=remote ?: return
+        sessionAction(gen) { if(ownsCamera(camera,gen)) camera.focus() }
     }
-    fun capture() = action { shutter.withLock { captureInternal() } }
-    private suspend fun captureInternal() {
-        val camera=requireNotNull(remote)
+    fun movie() {
+        val gen=state.value.sessionGeneration
+        val camera=remote ?: return
+        val recording=state.value.remote.status.contains("MovieRecording",true)
+        sessionAction(gen) { if(ownsCamera(camera,gen)) camera.movie(!recording) }
+    }
+    fun capture() {
+        val gen=state.value.sessionGeneration
+        val camera=remote ?: return
+        sessionAction(gen) { shutter.withLock { captureInternal(camera,gen) } }
+    }
+    /** True only while [camera] is still the live remote for [gen]; checked before every command so an
+     * old capture/interval can never send to a newer session. */
+    private fun ownsCamera(camera: RemoteCamera, gen: Long): Boolean =
+        whenGeneration(gen) { remote===camera } == true
+    private suspend fun captureInternal(camera: RemoteCamera, gen: Long) {
+        if(!ownsCamera(camera,gen)) return
         log("请求拍照",tag="CAPTURE")
+        if(!ownsCamera(camera,gen)) return
         val urls=camera.takePicture()
         log("拍照返回 previews=${urls.size}",tag="CAPTURE")
-        urls.forEach(::importPostview)
-        if(urls.isEmpty()) update { copy(message="快门请求已接受，未返回 JPEG 预览；请检查相机") }
+        urls.forEach { importPostview(it,gen) }
+        if(urls.isEmpty()) whenGeneration(gen) { update { copy(message="快门请求已接受，未返回 JPEG 预览；请检查相机") } }
     }
-    private fun importPostview(url: String) {
-        if(url in importedUrls) return
-        importedUrls += url
-        while(importedUrls.size>500) importedUrls.remove(importedUrls.first())
+    /** Dedup and enqueue under the same identity lock, so a stale postview cannot mutate the import
+     * set or enqueue into a newer session. */
+    private fun importPostview(url: String, gen: Long) {
         val name=runCatching { java.net.URI(url).path.substringAfterLast('/') }.getOrDefault("").takeIf { it.endsWith(".jpg",true) }
             ?: "Remote_${System.currentTimeMillis()}.JPG"
-        enqueue(listOf(CameraFile(url,name,listOf(Resource(url)),thumbnail=url)))
+        identity.locked {
+            if(gen!=identity.currentGeneration) return@locked
+            if(url in importedUrls) return@locked
+            importedUrls += url
+            while(importedUrls.size>500) importedUrls.remove(importedUrls.first())
+            enqueue(listOf(CameraFile(url,name,listOf(Resource(url)),thumbnail=url)),gen)
+        }
     }
     fun interval(count: Int, seconds: Int) {
         if(intervalJob?.isActive==true) return
+        val gen=state.value.sessionGeneration
+        val camera=remote ?: return
         intervalJob=scope.launch {
             try {
                 repeat(count.coerceIn(1,999)) { index ->
-                    update { copy(intervalRemaining=count-index) }
-                    shutter.withLock { captureInternal() }
+                    if(!ownsCamera(camera,gen)) return@launch
+                    whenGeneration(gen) { update { copy(intervalRemaining=count-index) } }
+                    shutter.withLock { captureInternal(camera,gen) }
                     if(index<count-1) delay(seconds.coerceIn(2,3600)*1000L)
                 }
-            } catch(e: CancellationException) { throw e } catch(e: Exception) { update { copy(error=e.message) } }
-            finally { update { copy(intervalRemaining=0) } }
+            } catch(e: CancellationException) { throw e } catch(e: Exception) { whenGeneration(gen) { update { copy(error=e.message) } } }
+            finally { whenGeneration(gen) { update { copy(intervalRemaining=0) } } }
         }
     }
     fun stopInterval() { intervalJob?.cancel() }
-    fun browse(id: String) = action {
-        update { copy(busy=true) }
-        try {
-            log("浏览目录 id=$id",LogLevel.DEBUG,"BROWSE")
-            val files=requireNotNull(smartphone).browse(id); update { copy(files=files,folder=id) }
-            log("目录返回 id=$id entries=${files.size}",LogLevel.DEBUG,"BROWSE")
+    fun browse(id: String) {
+        val gen=state.value.sessionGeneration
+        val camera=smartphone ?: return
+        sessionAction(gen) {
+            if(whenGeneration(gen) { smartphone===camera } != true) return@sessionAction
+            whenGeneration(gen) { update { copy(busy=true) } }
+            try {
+                log("浏览目录 id=$id",LogLevel.DEBUG,"BROWSE")
+                val files=camera.browse(id)
+                whenGeneration(gen) { if(smartphone===camera) update { copy(files=files,folder=id) } }
+                log("目录返回 id=$id entries=${files.size}",LogLevel.DEBUG,"BROWSE")
+            }
+            finally { whenGeneration(gen) { update { copy(busy=false) } } }
         }
-        finally { update { copy(busy=false) } }
     }
     fun root() { smartphone?.let { browse(it.rootId) } }
     suspend fun cameraPreview(file: CameraFile, expectedScope: String?, expectedGeneration: Long = state.value.sessionGeneration): Bitmap? {

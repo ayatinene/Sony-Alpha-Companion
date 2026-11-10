@@ -56,6 +56,17 @@ class ConnectionRegressionTest {
             assertTrue(withTimeout(3000) { result.await() }.exceptionOrNull() is IOException)
         }
     }
+    @Test fun closedClientRejectsNewRequestsWithoutTouchingTheSocket()=runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("OK"))
+            val http=CameraHttp()
+            assertEquals("OK",http.getText(server.url("/file").toString()))
+            http.close()
+            try { http.getText(server.url("/file").toString()); fail("a closed transport must reject new requests") }
+            catch(e: IOException) { assertTrue("expected CameraHttpClosedException, was $e",e is CameraHttpClosedException) }
+            assertEquals("no request may reach the camera after close",1,server.requestCount)
+        }
+    }
     @Test fun versionOneCurrentFieldsRemainVisibleWithoutWritableApis()=runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("""{"result":[{"type":"cameraStatus","cameraStatus":"IDLE"},{"type":"fNumber","currentFNumber":"8.0"},{"type":"isoSpeedRate","currentIsoSpeedRate":"AUTO"},{"type":"shutterSpeed","currentShutterSpeed":"1/30"},{"type":"focusMode","currentFocusMode":"AF-C"}]}"""))

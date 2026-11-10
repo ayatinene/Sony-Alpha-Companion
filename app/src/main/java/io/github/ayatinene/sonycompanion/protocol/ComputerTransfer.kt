@@ -17,24 +17,35 @@ import java.net.InetAddress
  * long scan never holds the session lock and a user download always preempts the next scan step.
  * The GUID is never written to [report]; only connection progress and failures are reported.
  */
-class ComputerTransfer(private val network: Network,
-    private val reportLog: (LogLevel, String, Throwable?) -> Unit = { _, _, _ -> }) : ComputerSession {
+class ComputerTransfer(
+    private val network: Network?,
+    private val socketFactory: javax.net.SocketFactory?,
+    private val closeGraceMillis: Long = CLOSE_GRACE_MILLIS,
+    private val reportLog: (LogLevel, String, Throwable?) -> Unit
+) : ComputerSession {
+    /** Production constructor: the transport uses [network]'s socket factory. */
+    constructor(network: Network, reportLog: (LogLevel, String, Throwable?) -> Unit = { _, _, _ -> })
+        : this(network, null, CLOSE_GRACE_MILLIS, reportLog)
+
     var serial: String = ""; private set
     var firmware: String = ""; private set
-    private var connection: PtpConnection? = null
-    private var transport: PtpIpConnection? = null
-    private var session: PtpSession? = null
+    @Volatile private var connection: PtpConnection? = null
+    @Volatile private var transport: PtpIpConnection? = null
+    @Volatile private var session: PtpSession? = null
     private val scheduler = SessionScheduler()
     private val transactions = TransactionRunner(scheduler, ::abort) { isCompleteResponse(it) }
-    private val closer = GracefulCloser(CLOSE_GRACE_MILLIS)
-    @Volatile private var closed = false
+    private val finishSequence = FinishSequence(closeGraceMillis)
+    private val gate = SessionGate()
+    @Volatile private var sonyPairSupported = false
+    @Volatile private var sonyHandshakeDone = false
 
-    override val alive: Boolean get() = !closed && session != null && connection?.isConnected == true
+    override val alive: Boolean get() = gate.isOpen && session != null && connection?.isConnected == true
 
     suspend fun connect(host: String, guid: String): String = withContext(Dispatchers.IO) {
         val bytes = parseGuid(guid)
         reportLog(LogLevel.DEBUG, "打开原文件会话 host=$host", null)
-        val transport = PtpIpConnection().apply { setSocketFactory(network.socketFactory) }; this@ComputerTransfer.transport = transport
+        val transport = PtpIpConnection()
+        (socketFactory ?: network?.socketFactory)?.let { transport.setSocketFactory(it) }
         // Route structured PTP/PTP-IP diagnostics into the app log. The observer contract guarantees
         // the message never carries the GUID or payload bytes; the original cause chain is preserved.
         transport.setLogObserver(object : PtpLogObserver {
@@ -42,16 +53,24 @@ class ComputerTransfer(private val network: Network,
                 reportLog(ptpLevel(level, message), message ?: "PTP 日志", error)
             }
         })
-        val c = PtpConnection(transport); connection = c
+        val c = PtpConnection(transport)
+        // Publish under the same lock as abort(): a connect racing a close is rejected and its fresh
+        // transport is torn down, so a closed session can never be revived by a late connect.
+        if (!gate.publish { this@ComputerTransfer.transport = transport; connection = c }) {
+            runCatching { transport.close() }
+            throw IOException("原文件会话已结束")
+        }
         try {
             c.connect(PtpIpConnection.PtpIpAddress(InetAddress.getByName(host), 15740),
                 PtpIpConnection.PtpIpHostId(bytes, "Alpha Companion"))
-            val s = c.openSession(); session = s
+            val s = c.openSession()
+            if (!gate.publish { session = s }) { runCatching { s.close() }; throw IOException("原文件会话已结束") }
             val info = c.deviceInfo
             serial = info.mSerialNumber.mString
             firmware = info.mDeviceVersion.mString
             val codes = info.mOperationsSupported.values.map { it.mValue }
-            if (0x9280 in codes && 0x9281 in codes) s.sonyStartTransfer()
+            sonyPairSupported = 0x9280 in codes && 0x9281 in codes
+            if (sonyPairSupported) { s.sonyStartTransfer(); sonyHandshakeDone = true }
             reportLog(LogLevel.INFO, "原文件 PTP/IP 会话已打开", null)
             info.mModel.mString
         } catch (e: PtpIpExceptions.OperationFailed) {
@@ -111,26 +130,44 @@ class ComputerTransfer(private val network: Network,
         }
 
     private suspend fun <T> transaction(priority: SessionPriority, block: suspend (PtpSession) -> T): T =
-        transactions.run(priority, { closed }, { session }, block)
+        transactions.run(priority, { !gate.isOpen }, { session }, block)
 
-    /** Graceful CloseSession, but bounded. If the camera does not answer, [abort] closes the transport
-     * which unblocks the pending close, so resources are released instead of leaking for the socket
-     * timeout. The close worker is detached so cancelling the caller still reaches [abort]. */
-    suspend fun finish() {
+    /**
+     * Bounded, idempotent finish. [sleepCamera] requests the Sony sleep pair only when both opcodes
+     * are advertised and the start handshake completed; otherwise a standard CloseSession is sent and
+     * the skip is recorded. The pair + close hold the transaction lock and share one grace budget;
+     * a busy lock aborts instead of waiting, and the raw transport is always torn down.
+     */
+    suspend fun finish(sleepCamera: Boolean = false) {
+        if (!gate.beginFinish()) return
         val s = session
         if (s == null) { abort(); return }
-        closer.close(
-            blockingClose = { runCatching { s.close() }.onFailure { reportLog(LogLevel.DEBUG, "关闭原文件会话：${it.message}", it) } },
+        val sleep = shouldSleep(sleepCamera, sonyPairSupported, sonyHandshakeDone)
+        if (sleepCamera && !sleep)
+            reportLog(LogLevel.INFO, "跳过相机休眠：未同时支持 0x9280/0x9281 或未完成开始握手", null)
+        val sleepAction: (() -> Unit)? = if (sleep) ({ s.sonySleep() }) else null
+        finishSequence.run(
+            scheduler = scheduler,
+            sleep = sleepAction,
+            close = { s.close() },
             abort = { abort() },
-            onTimeout = { reportLog(LogLevel.WARN, "关闭原文件会话超时，强制中止", null) }
+            onTimeout = { reportLog(LogLevel.WARN, "关闭原文件会话超时，强制中止", null) },
+            onFailure = { e -> reportLog(LogLevel.WARN, "结束原文件会话失败：${e.message}", e) },
+            onWorkerStuck = { reportLog(LogLevel.WARN, "结束原文件会话的工作线程未在预算内退出", null) }
         )
     }
 
     override fun abort() {
-        closed = true
-        transport?.close(); transport = null
-        runCatching { connection?.close() }
-        session = null; connection = null
+        var t: PtpIpConnection? = null
+        var c: PtpConnection? = null
+        gate.close {
+            t = transport; c = connection
+            transport = null; connection = null; session = null
+        }
+        // Lower the raw transport first: it interrupts a blocked PTP read before the wrapper, whose
+        // close() would send a CloseSession, runs. Both calls are idempotent.
+        runCatching { t?.close() }
+        runCatching { c?.close() }
     }
 
     companion object {
@@ -142,6 +179,9 @@ class ComputerTransfer(private val network: Network,
          * [PtpIpExceptions.OperationFailed] is a device-cancelled / half transaction and must abort.
          */
         fun isCompleteResponse(error: Throwable): Boolean = error is PtpExceptions.OperationFailed
+        /** Sleep is only attempted when both Sony opcodes are advertised, the start handshake completed and the caller asked. */
+        fun shouldSleep(sleepCamera: Boolean, pairSupported: Boolean, handshakeDone: Boolean): Boolean =
+            sleepCamera && pairSupported && handshakeDone
         fun parseGuid(value: String): ShortArray {
             val hex = value.replace(":","").replace("-","").trim()
             require(hex.length == 32 && hex.all { it in '0'..'9' || it.lowercaseChar() in 'a'..'f' }) { "请输入已登记的 16 字节 GUID（32 位十六进制），请勿填入随机值" }

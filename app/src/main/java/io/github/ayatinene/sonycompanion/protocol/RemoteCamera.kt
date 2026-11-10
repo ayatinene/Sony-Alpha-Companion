@@ -12,10 +12,21 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class CameraApiError(val code: Int, detail: String) : Exception("相机 API $code: $detail")
 class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
+    private val stillOwned: () -> Boolean = { true },
     private val trace: (String) -> Unit = {}) {
+    /** Whether this app called `startRecMode` and got an explicit success. A lost/timed-out response
+     * is [Uncertain]: record mode is not owned, so the end sequence must not blindly stop it. */
+    enum class RecModeOwnership { None, Active, Uncertain }
     private val nextId = AtomicInteger(1)
     var state = RemoteState(); private set
     private var liveViewStarted = false
+    private var recMode = RecModeOwnership.None
+    @Volatile private var allowCleanup = true
+    /** True only when this app entered record mode with an explicit success response. */
+    val ownsRecMode: Boolean get() = recMode == RecModeOwnership.Active
+    /** Marks this camera as being torn down so its end sequence cannot send a cleanup RPC: a forced
+     * disconnect must not stop record mode after cancelling an in-flight capture. */
+    fun disallowCleanup() { allowCleanup = false }
     suspend fun call(method: String, params: List<Any> = emptyList(), version: String = "1.0"): JSONArray {
         val request = JSONObject().put("method",method).put("params",JSONArray(params))
             .put("id",nextId.getAndIncrement()).put("version",version)
@@ -28,7 +39,11 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
     suspend fun initialize(): RemoteState {
         refresh()
         if ("startRecMode" in state.apis) {
-            call("startRecMode")
+            // Ownership is only claimed on an explicit success: an uncertain (lost/timed-out) start
+            // must not be blindly undone with stopRecMode.
+            recMode = RecModeOwnership.Uncertain
+            try { call("startRecMode"); recMode = RecModeOwnership.Active }
+            catch (e: CameraApiError) { recMode = RecModeOwnership.None; throw e }
             for(attempt in 0 until 10) {
                 delay(400); refresh()
                 if ("startLiveview" in state.apis || "actTakePicture" in state.apis) break
@@ -132,7 +147,9 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
     suspend fun focus() {
         require("actHalfPressShutter" in state.apis && "cancelHalfPressShutter" in state.apis) { "相机未开放半按快门" }
         call("actHalfPressShutter")
-        try { delay(700) } finally { withContext(NonCancellable) { call("cancelHalfPressShutter") } }
+        // Only release the half press while this camera is still the live session: an ended session
+        // must not send a follow-up command to a transport that is being torn down.
+        try { delay(700) } finally { withContext(NonCancellable) { if(stillOwned()) call("cancelHalfPressShutter") } }
     }
     suspend fun liveView(): String {
         val url=call("startLiveview").getString(0)
@@ -142,12 +159,29 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
     suspend fun stopLiveView() {
         if(!liveViewStarted) return
         liveViewStarted=false
+        if(!allowCleanup || http.isClosed) return
         if("stopLiveview" in state.apis) call("stopLiveview")
     }
     suspend fun movie(start: Boolean) {
         val method = if(start) "startMovieRec" else "stopMovieRec"
         require(method in state.apis) { "当前相机模式未开放录像操作" }
         call(method)
+    }
+    /**
+     * End sequence for a normal disconnect: stop live view, then leave record mode only when this app
+     * entered it with an explicit success and no recording is in progress. It never stops a recording
+     * and never resends the shutter. Each step is best-effort but the caller's cancellation is not
+     * swallowed, so a bounded caller can still time this out.
+     */
+    suspend fun finish() {
+        bestEffort { stopLiveView() }
+        if(!allowCleanup || http.isClosed) { recMode = RecModeOwnership.None; return }
+        val recording = state.status.contains("MovieRecording", true)
+        if(recMode == RecModeOwnership.Active && !recording && "stopRecMode" in state.apis) bestEffort { call("stopRecMode") }
+        recMode = RecModeOwnership.None
+    }
+    private suspend fun bestEffort(block: suspend () -> Unit) {
+        try { block() } catch (e: CancellationException) { throw e } catch (_: Exception) { }
     }
 }
 fun JSONArray.strings(): List<String> = (0 until length()).mapNotNull { opt(it)?.takeIf { x -> x is String }?.toString() }

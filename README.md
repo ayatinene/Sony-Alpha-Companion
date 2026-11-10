@@ -1,6 +1,6 @@
 # Sony Alpha Companion
 
-给 Sony α7R II（ILCE-7RM2）用的 Android 客户端，当前版本 `0.1.11-preview`。
+给 Sony α7R II（ILCE-7RM2）用的 Android 客户端，当前版本 `0.1.12-preview`。
 
 ## 能做什么
 
