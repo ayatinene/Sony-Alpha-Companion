@@ -188,7 +188,13 @@ public class PtpOperation {
                 try {mData.read(mDataBuffer); mDataBuffer = null;}
                 catch (Exception e) {throw new PtpExceptions.PtpProtocolViolation("Error parsing response data!", e);}
             }
-            if (mData != null) LOG.info("PTP: Response data received: " + mData);
+            if (mData != null) {
+                // Never log object/photo bytes.
+                if (mData instanceof PtpDataType.Object)
+                    LOG.info("PTP: Response data received: [Object][Length: " + ((PtpDataType.Object) mData).mObject.length + "]");
+                else
+                    LOG.info("PTP: Response data received: " + mData);
+            }
         }
 
         public String toString() {return "[OpsRsp][RpsCode: " + mRspCode + ", Parameters: " + arrayToString(mParameters) + ", Data: " + mData + "]";}
