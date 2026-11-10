@@ -296,7 +296,7 @@ private fun openAppSettings(context:Context) {
         item { OutlinedButton(onClick={export.launch(DiagnosticFiles.name(state.mode))},shape=shape){Icon(Icons.Outlined.BugReport,null);Spacer(Modifier.width(8.dp));Text("导出日志与诊断")} }
         item { HorizontalDivider() }
         item { Text("关于与许可",style=MaterialTheme.typography.titleMedium) }
-        item { Text("版本 ${BuildConfig.VERSION_NAME}\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n二维码扫描：ZXing Android Embedded / ZXing · Apache-2.0。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Text("版本 ${AppVersion.label(BuildConfig.VERSION_NAME,BuildConfig.GIT_REVISION)}\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n二维码扫描：ZXing Android Embedded / ZXing · Apache-2.0。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
     }
     if(registerUsb) AlertDialog(onDismissRequest={registerUsb=false},title={Text("登记相机的接收端？")},text={
         Text("$usbInfo\n\n这会替换相机“发送到电脑”的接收端设置。"+(if(guid.isBlank()) "将生成并保存本应用专用 GUID。" else "将登记输入框中的 GUID。")+"如需保留电脑接收端，请先保存其 GUID。")

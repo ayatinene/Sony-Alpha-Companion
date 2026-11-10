@@ -1,5 +1,6 @@
 package io.github.ayatinene.sonycompanion.data
 
+import io.github.ayatinene.sonycompanion.BuildConfig
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -23,7 +24,7 @@ object CrashLog {
     }
     fun record(directory: File, thread: String, error: Throwable) {
         val trace=StringWriter().also { error.printStackTrace(PrintWriter(it)) }.toString()
-        File(directory,"last-crash.txt").writeText("${java.time.OffsetDateTime.now()} thread=$thread\n${trace.take(100_000)}")
+        File(directory,"last-crash.txt").writeText("${java.time.OffsetDateTime.now()} version=${AppVersion.label(BuildConfig.VERSION_NAME,BuildConfig.GIT_REVISION)} thread=$thread\n${trace.take(100_000)}")
     }
     fun read(directory: File): String? = runCatching {
         File(directory,"last-crash.txt").takeIf(File::isFile)?.inputStream()?.bufferedReader()?.use { it.readText().take(110_000) }

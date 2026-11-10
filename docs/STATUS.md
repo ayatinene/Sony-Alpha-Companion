@@ -1,6 +1,6 @@
 # 版本状态与限制
 
-当前版本：`0.1.14-preview`（`versionCode 15`）。
+当前版本：`0.1.16-preview`（`versionCode 17`）。
 适用环境：Sony α7R II（ILCE-7RM2，固件 4.01），Android 10 及以上。
 
 ## 测试状态

@@ -140,7 +140,7 @@ class CompanionController(private val context: Context) {
                     }
                 }
         }
-        log("应用启动 version=${BuildConfig.VERSION_NAME} sdk=${android.os.Build.VERSION.SDK_INT} device=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}",tag="APP")
+        log("应用启动 version=${AppVersion.label(BuildConfig.VERSION_NAME,BuildConfig.GIT_REVISION)} sdk=${android.os.Build.VERSION.SDK_INT} device=${android.os.Build.MANUFACTURER}/${android.os.Build.MODEL}",tag="APP")
         // Foreground sampling follows the live session: it stops on disconnect, on hiding and on disable.
         scope.launch {
             state.map { it.mode to it.connected }.distinctUntilChanged().collect { applyLocationSampling() }
@@ -1966,6 +1966,7 @@ class CompanionController(private val context: Context) {
         val remote=if(snapshot.remote.application.isNotBlank()) snapshot.remote else if(previous) lastRemote else snapshot.remote
         return JSONObject().apply {
             put("app",BuildConfig.VERSION_NAME); put("versionCode",BuildConfig.VERSION_CODE)
+            put("gitRevision",BuildConfig.GIT_REVISION); put("appVersion",AppVersion.label(BuildConfig.VERSION_NAME,BuildConfig.GIT_REVISION))
             put("exportedAt",java.time.OffsetDateTime.now().toString()); put("android",android.os.Build.VERSION.SDK_INT)
             put("device","${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
             put("cameraFirmwareUserProvided","4.01"); put("mode",snapshot.mode?.name); put("connected",snapshot.connected)
