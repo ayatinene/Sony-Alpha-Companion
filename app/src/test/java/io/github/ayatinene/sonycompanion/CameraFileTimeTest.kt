@@ -5,11 +5,25 @@ import io.github.ayatinene.sonycompanion.data.captureTimeMillis
 import io.github.ayatinene.sonycompanion.data.matchCurrentFile
 import org.junit.Assert.*
 import org.junit.Test
+import java.time.Instant
 import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.util.TimeZone
 
 /** Exercises [captureTimeMillis] for RAW, JPEG and PTP compact dates without touching the raw string. */
 class CameraFileTimeTest {
     private val shanghai = ZoneId.of("Asia/Shanghai")
+
+    /** The exact string `Date.toString()` writes on a device whose default zone is [zoneId]. */
+    private fun dateToString(zoneId: String, epochMillis: Long): String {
+        val previous = TimeZone.getDefault()
+        return try {
+            TimeZone.setDefault(TimeZone.getTimeZone(zoneId))
+            java.util.Date(epochMillis).toString()
+        } finally {
+            TimeZone.setDefault(previous)
+        }
+    }
 
     @Test fun parsesTheRawDateToStringFormAndHonoursTheEmbeddedZone() {
         val text = "Sat Oct 24 13:00:00 GMT+08:00 2026"
@@ -60,6 +74,40 @@ class CameraFileTimeTest {
     @Test fun aMissingZoneUsesTheProvidedZoneInsteadOfDroppingIt() {
         assertEquals(1792818000000L, captureTimeMillis("2026-10-24T13:00:00", shanghai))
         assertEquals(1792846800000L, captureTimeMillis("2026-10-24T13:00:00", ZoneId.of("UTC")))
+    }
+
+    @Test fun rawDateAbbreviationResolvesToTheCallersOwnZoneInsteadOfTheAmbiguousShortIds() {
+        // A device in Asia/Shanghai writes "CST"; ZoneId.SHORT_IDS alone would wrongly pick America/Chicago.
+        val instant = Instant.parse("2026-10-24T05:00:00Z")
+        val text = dateToString("Asia/Shanghai", instant.toEpochMilli())
+        assertTrue(text, text.contains("CST"))
+        assertEquals(instant.toEpochMilli(), captureTimeMillis(text, shanghai))
+    }
+
+    @Test fun rawDateAbbreviationFollowsDaylightSavingInAmericaChicago() {
+        val chicago = ZoneId.of("America/Chicago")
+        val winter = Instant.parse("2026-01-15T18:00:00Z")
+        val summer = Instant.parse("2026-07-15T17:00:00Z")
+        val winterText = dateToString("America/Chicago", winter.toEpochMilli())
+        val summerText = dateToString("America/Chicago", summer.toEpochMilli())
+        assertTrue(winterText, winterText.contains("CST"))
+        assertTrue(summerText, summerText.contains("CDT"))
+        assertEquals(winter.toEpochMilli(), captureTimeMillis(winterText, chicago))
+        assertEquals(summer.toEpochMilli(), captureTimeMillis(summerText, chicago))
+    }
+
+    @Test fun rawDateWithAnExplicitOffsetIgnoresTheCallersZone() {
+        val text = "Sat Oct 24 13:00:00 GMT+08:00 2026"
+        assertEquals(1792818000000L, captureTimeMillis(text, ZoneId.of("America/Chicago")))
+        assertEquals(1792818000000L, captureTimeMillis(text, ZoneId.of("UTC")))
+        assertEquals(1792818000000L, captureTimeMillis(text, shanghai))
+    }
+
+    @Test fun aRawAbbreviationThatDoesNotNameTheCallersZoneFallsBackToShortIds() {
+        val text = "Sat Jan 10 13:00:00 CST 2026"
+        val chicago = ZonedDateTime.of(2026, 1, 10, 13, 0, 0, 0, ZoneId.of("America/Chicago")).toInstant().toEpochMilli()
+        // UTC never writes "CST", so the legacy SHORT_IDS mapping (CST -> America/Chicago) is preserved.
+        assertEquals(chicago, captureTimeMillis(text, ZoneId.of("UTC")))
     }
 
     @Test fun parsingLeavesTheQueueIdentityDateUntouched() {

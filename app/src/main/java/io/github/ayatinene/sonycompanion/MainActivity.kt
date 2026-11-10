@@ -18,7 +18,9 @@ class MainActivity: ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent { CompanionApp(model,openWifi={ startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) },requestPermissions={
-            if(Build.VERSION.SDK_INT>=33) permission.launch(arrayOf(Manifest.permission.NEARBY_WIFI_DEVICES,Manifest.permission.POST_NOTIFICATIONS))
+            // Manual remedy for the notification permission only; the app needs no nearby-devices
+            // runtime permission (see ConnectionPermissionPolicy) and location has its own switch.
+            if(Build.VERSION.SDK_INT>=33) permission.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
         }) }
     }
     override fun onStart() { super.onStart(); model.controller.setVisible(true) }

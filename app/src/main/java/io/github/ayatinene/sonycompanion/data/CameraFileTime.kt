@@ -20,7 +20,7 @@ import java.util.Locale
 fun captureTimeMillis(date: String, zone: ZoneId = ZoneId.systemDefault()): Long? {
     val text = date.trim()
     if (text.isEmpty()) return null
-    return parseRawDate(text) ?: parseIsoDate(text, zone) ?: parsePtpCompact(text, zone)
+    return parseRawDate(text, zone) ?: parseIsoDate(text, zone) ?: parsePtpCompact(text, zone)
 }
 
 /** `java.util.Date.toString()` without its zone token: English abbreviations, 4-digit year. */
@@ -38,14 +38,31 @@ private val PTP_COMPACT_FORMAT: DateTimeFormatter = DateTimeFormatterBuilder()
     .toFormatter(Locale.US)
     .withResolverStyle(ResolverStyle.STRICT)
 
+/** English short zone name (DST-aware) for the caller's zone at a given local time. */
+private val SHORT_ZONE_NAME: DateTimeFormatter = DateTimeFormatter.ofPattern("z", Locale.US)
+
 /** `Date.toString()` is exactly six single-spaced tokens; isolate the zone token positionally. */
-private fun parseRawDate(text: String): Long? {
+private fun parseRawDate(text: String, zone: ZoneId): Long? {
     val tokens = text.split(' ').filter { it.isNotEmpty() }
     if (tokens.size != 6) return null
-    val zone = attempt { ZoneId.of(tokens[4], ZoneId.SHORT_IDS) } ?: return null
     val localText = "${tokens[0]} ${tokens[1]} ${tokens[2]} ${tokens[3]} ${tokens[5]}"
     val local = attempt { LocalDateTime.parse(localText, RAW_LOCAL_FORMAT) } ?: return null
-    return attempt { local.atZone(zone).toInstant().toEpochMilli() }
+    val resolved = resolveRawZone(tokens[4], local, zone) ?: return null
+    return attempt { local.atZone(resolved).toInstant().toEpochMilli() }
+}
+
+/**
+ * Resolves the abbreviation `Date.toString()` writes. An explicit offset or fixed zone (`UTC`, `GMT`,
+ * `GMT+08:00`, `Z`, `+08:00`) always wins. Otherwise, a short name that matches the caller's own zone
+ * at this local time (e.g. `CST` in Asia/Shanghai, `CDT` in America/Chicago in summer) means the
+ * caller's zone, not the ambiguous [ZoneId.SHORT_IDS] default. Only then does it fall back to
+ * [ZoneId.SHORT_IDS] for tokens that name no zone the caller is in.
+ */
+private fun resolveRawZone(token: String, local: LocalDateTime, zone: ZoneId): ZoneId? {
+    attempt { ZoneId.of(token) }?.let { return it }
+    val localShort = attempt { local.atZone(zone).format(SHORT_ZONE_NAME) }
+    if (localShort != null && token.equals(localShort, ignoreCase = true)) return zone
+    return attempt { ZoneId.of(token, ZoneId.SHORT_IDS) }
 }
 
 private fun parseIsoDate(text: String, zone: ZoneId): Long? =

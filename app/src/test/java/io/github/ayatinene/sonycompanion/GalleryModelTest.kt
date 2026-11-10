@@ -5,10 +5,12 @@ import io.github.ayatinene.sonycompanion.data.CameraMode
 import io.github.ayatinene.sonycompanion.data.Resource
 import io.github.ayatinene.sonycompanion.data.ScanPhase
 import io.github.ayatinene.sonycompanion.data.ScanState
+import io.github.ayatinene.sonycompanion.data.captureTimeMillis
 import io.github.ayatinene.sonycompanion.ui.GallerySort
 import io.github.ayatinene.sonycompanion.ui.continueHistoryEnabled
 import io.github.ayatinene.sonycompanion.ui.downloadNewFilesEnabled
 import io.github.ayatinene.sonycompanion.ui.effectiveFileSize
+import io.github.ayatinene.sonycompanion.ui.folderDateMillis
 import io.github.ayatinene.sonycompanion.ui.galleryEmptyState
 import io.github.ayatinene.sonycompanion.ui.galleryFiltered
 import io.github.ayatinene.sonycompanion.ui.galleryReadAllowed
@@ -97,8 +99,21 @@ class GalleryModelTest {
         val blank = file("blank", date = "")
         val broken = file("broken", date = "not a date")
         val files = listOf(blank, dated, broken)
+        // Known dates lead; unknown files keep the stable ascending name fallback in both directions
+        // (only folders follow the selected direction).
         assertEquals(listOf("dated", "blank", "broken"), gallerySorted(files, GallerySort.Newest).map { it.id })
         assertEquals(listOf("dated", "blank", "broken"), gallerySorted(files, GallerySort.Oldest).map { it.id })
+    }
+
+    @Test fun onlyFoldersFollowTheDirectionForAnUnknownTime() {
+        val b = file("b", container = true)
+        val a = file("a", container = true)
+        assertEquals(listOf("b", "a"), gallerySorted(listOf(a, b), GallerySort.Newest).map { it.id })
+        assertEquals(listOf("a", "b"), gallerySorted(listOf(a, b), GallerySort.Oldest).map { it.id })
+        val fileB = file("b")
+        val fileA = file("a")
+        assertEquals(listOf("a", "b"), gallerySorted(listOf(fileB, fileA), GallerySort.Newest).map { it.id })
+        assertEquals(listOf("a", "b"), gallerySorted(listOf(fileB, fileA), GallerySort.Oldest).map { it.id })
     }
 
     @Test fun sameCaptureTimeFallsBackToNaturalNameAscendingInBothDirections() {
@@ -146,12 +161,67 @@ class GalleryModelTest {
         assertEquals(listOf("IMG_1", "img_2"), gallerySorted(listOf(lower, upper), GallerySort.NameAscending).map { it.name })
     }
 
-    @Test fun foldersAlwaysLeadInNaturalNameOrderForEverySort() {
-        val files = listOf(file("b"), file("dir10", container = true), file("a"), file("dir2", container = true))
+    @Test fun foldersLeadFilesUnderEverySort() {
+        val folders = listOf(file("zdir", container = true), file("adir", container = true))
+        val files = listOf(named("a.jpg"), named("z.jpg"))
         GallerySort.entries.forEach { sort ->
-            val ids = gallerySorted(files, sort).map { it.id }
-            assertEquals("folders first for $sort", listOf("dir2", "dir10"), ids.take(2))
+            val ids = gallerySorted(folders + files, sort).map { it.id }
+            assertEquals("folders first for $sort", setOf("adir", "zdir"), ids.take(2).toSet())
         }
+    }
+
+    @Test fun undatedFoldersFollowTheChosenSortKeyInsteadOfAlwaysAscendingByName() {
+        val alpha = file("alpha", container = true)
+        val bravo = file("bravo", container = true)
+        val charlie = file("charlie", container = true)
+        val files = listOf(bravo, charlie, alpha)
+        // Undated folders have no time, so the time fallback follows the chosen direction (oldest-first
+        // is ascending); the default newest-first is descending, matching the old default.
+        assertEquals(listOf("charlie", "bravo", "alpha"), gallerySorted(files, GallerySort.Newest).map { it.id })
+        assertEquals(listOf("alpha", "bravo", "charlie"), gallerySorted(files, GallerySort.Oldest).map { it.id })
+        assertEquals(listOf("alpha", "bravo", "charlie"), gallerySorted(files, GallerySort.NameAscending).map { it.id })
+        // Name descending must actually reverse the folders, not leave them ascending.
+        assertEquals(listOf("charlie", "bravo", "alpha"), gallerySorted(files, GallerySort.NameDescending).map { it.id })
+        // Folders have no real size; both size directions keep a stable natural-name ascending order.
+        assertEquals(listOf("alpha", "bravo", "charlie"), gallerySorted(files, GallerySort.SizeAsc).map { it.id })
+        assertEquals(listOf("alpha", "bravo", "charlie"), gallerySorted(files, GallerySort.SizeDesc).map { it.id })
+    }
+
+    @Test fun dateFolderTitlesDriveTimeSortsWhenTheirDateFieldIsBlank() {
+        val jan = CameraFile("jan", "2026-01-15", container = true)
+        val feb = CameraFile("feb", "2026-02-10", container = true)
+        val mar = CameraFile("mar", "2026-03-20", container = true)
+        val files = listOf(jan, mar, feb)
+        assertEquals(listOf("mar", "feb", "jan"), gallerySorted(files, GallerySort.Newest).map { it.id })
+        assertEquals(listOf("jan", "feb", "mar"), gallerySorted(files, GallerySort.Oldest).map { it.id })
+    }
+
+    @Test fun aDateFolderWithItsOwnDateIgnoresTheTitleForTimeSorts() {
+        // The titles would sort the other way; the real capture dates must win when present.
+        val namedOld = CameraFile("namedOld", "2020-01-01", container = true, date = "2026-12-31T00:00:00Z")
+        val namedNew = CameraFile("namedNew", "2026-12-31", container = true, date = "2020-01-01T00:00:00Z")
+        assertEquals(listOf("namedOld", "namedNew"), gallerySorted(listOf(namedNew, namedOld), GallerySort.Newest).map { it.id })
+        assertEquals(listOf("namedNew", "namedOld"), gallerySorted(listOf(namedNew, namedOld), GallerySort.Oldest).map { it.id })
+    }
+
+    @Test fun folderDateFallbackOnlyAcceptsTheConfirmedDateTitleForm() {
+        val zone = ZoneOffset.UTC
+        assertEquals(captureTimeMillis("2026-10-24", zone), folderDateMillis("2026-10-24", zone))
+        // A bare digit run, a camera directory and impossible dates never become a time.
+        assertNull(folderDateMillis("20261024", zone))
+        assertNull(folderDateMillis("100MSDCF", zone))
+        assertNull(folderDateMillis("DSC00042.JPG", zone))
+        assertNull(folderDateMillis("2026-2-4", zone))
+        assertNull(folderDateMillis("2026-13-01", zone))
+        assertNull(folderDateMillis("2026-02-30", zone))
+    }
+
+    @Test fun undatedFoldersThatDoNotLookLikeDatesStayUnknownAndSortLast() {
+        val dated = CameraFile("dated", "2026-01-15", container = true)
+        val plain = file("plain", container = true)
+        val files = listOf(plain, dated)
+        assertEquals(listOf("dated", "plain"), gallerySorted(files, GallerySort.Newest).map { it.id })
+        assertEquals(listOf("dated", "plain"), gallerySorted(files, GallerySort.Oldest).map { it.id })
     }
 
     @Test fun sizeSortsPutUnknownLastInBothDirectionsAndTieBreakNaturally() {
@@ -187,7 +257,9 @@ class GalleryModelTest {
 
     @Test fun galleryTimeTextFormatsKnownCaptureTimesAndOmitsMissingOnes() {
         assertEquals("2026-01-02 10:30", galleryTimeText("2026-01-02T10:30:00Z", ZoneOffset.UTC))
-        assertEquals("2026-01-02 10:30", galleryTimeText(rawDate("2026-01-02T10:30:00Z"), ZoneOffset.UTC))
+        // A raw Date.toString is written in the device zone, so read it back in that same zone: it must
+        // describe the same instant as the explicit ISO form regardless of the host timezone.
+        assertEquals(galleryTimeText("2026-01-02T10:30:00Z"), galleryTimeText(rawDate("2026-01-02T10:30:00Z")))
         assertNull(galleryTimeText("", ZoneOffset.UTC))
         assertNull(galleryTimeText("not a date", ZoneOffset.UTC))
     }

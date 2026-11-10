@@ -484,12 +484,15 @@ public class PtpIpConnection extends PtpTransport {
      * packets; a later close() cannot mask it with a generic "Connection closed".
      */
     private void failConnection(Exception cause) {
+        // Emit the diagnostic before publishing the terminal cause or releasing waiters: a caller
+        // that observes the failure (through getTerminalCause or a woken waiter) must be able to
+        // rely on the TRANSPORT record already having reached the observer.
+        log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, "TRANSPORT")
+                .message("Connection failed")
+                .error(cause).build());
         Exception effective = recordTerminal(cause);
         teardown();
         wakeWaiters(effective);
-        log(PtpLogRecord.builder(PtpLogRecord.Level.ERROR, "TRANSPORT")
-                .message("Connection failed")
-                .error(effective).build());
     }
 
     public void close() {
