@@ -34,7 +34,7 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
         val json = JSONObject(http.post(endpoint,request.toString()))
         val error = json.optJSONArray("error")
         if (error != null) throw CameraApiError(error.optInt(0,-1),error.optString(1))
-        return json.optJSONArray("result") ?: error("相机返回缺少 result：$method")
+        return sonyRpcResult(json, method) ?: error("相机返回缺少 result：$method")
     }
     suspend fun initialize(): RemoteState {
         refresh()
@@ -166,6 +166,81 @@ class RemoteCamera(private val endpoint: String, private val http: CameraHttp,
         val method = if(start) "startMovieRec" else "stopMovieRec"
         require(method in state.apis) { "当前相机模式未开放录像操作" }
         call(method)
+    }
+    /** Current camera function reported by getCameraFunction, or null when the camera does not expose
+     * it. A transient API error is surfaced so the caller can tolerate it during a switch. */
+    suspend fun cameraFunction(): String? {
+        if("getCameraFunction" !in state.apis) return null
+        val result=call("getCameraFunction")
+        return (result.opt(0) as? String ?: result.optJSONArray(0)?.optString(0))?.trim()?.takeIf { it.isNotEmpty() }
+    }
+    /** The functions the camera allows switching to (getSupportedCameraFunction). */
+    suspend fun supportedCameraFunctions(): List<String> =
+        call("getSupportedCameraFunction").optJSONArray(0)?.strings().orEmpty()
+    /** Switches the camera function (Remote Shooting <-> Contents Transfer). Never touches record mode
+     * ownership, so a later finish() still stops the record mode this app entered. The caller gates
+     * this on [gallerySupported]; the RPC error is surfaced rather than pre-empted, because the API
+     * list can legitimately change once the camera is already in Contents Transfer. */
+    suspend fun setCameraFunction(function: String) {
+        val version=functionVersion ?: error("相机未确认图库切换能力")
+        call("setCameraFunction", listOf(function),version)
+    }
+    /** The advertised version that declares [method], or null when no version advertises it. This is
+     * the dynamic method-version gate: a name merely appearing in getAvailableApiList is not enough. */
+    private var functionVersion: String? = null
+    suspend fun advertisedMethodVersion(method: String): String? {
+        val versions = try { call("getVersions").optJSONArray(0)?.strings().orEmpty() }
+            catch (e: CancellationException) { throw e } catch (_: Exception) { return null }
+        for (version in versions.sortedWith { a,b -> compareVersions(b,a) }) {
+            val types = try { call("getMethodTypes", listOf<Any>(version)) }
+                catch (e: CancellationException) { throw e } catch (_: Exception) { continue }
+            val rows = types.optJSONArray(0)?.takeIf { it.opt(0) is JSONArray } ?: types
+            for (i in 0 until rows.length()) {
+                val row = rows.optJSONArray(i) ?: continue
+                if (row.optString(0) == method) {
+                    // Sony returns the method's declared version in column 4, which may be
+                    // lower than the getMethodTypes query version (e.g. queried 1.4,
+                    // setCameraFunction declared 1.0 on an actual ILCE-7RM2).
+                    val declared = row.optString(3).trim()
+                    return declared.takeIf { it in versions } ?: version
+                }
+            }
+        }
+        return null
+    }
+    // setCameraFunction can be omitted from the available list even when the supported functions
+    // and method declaration allow it. Probe read-only capabilities before enabling the switch.
+    suspend fun gallerySupported(): Boolean {
+        functionVersion=null
+        val version=advertisedMethodVersion("setCameraFunction") ?: return false
+        val functions = try { supportedCameraFunctions() }
+            catch (e: CancellationException) { throw e } catch (_: Exception) { return false }
+        if(functions.none { it.equals(RemoteFunction.CONTENTS_TRANSFER, true) }) return false
+        if(functions.none { it.equals(RemoteFunction.REMOTE_SHOOTING, true) }) return false
+        functionVersion=version
+        return true
+    }
+    /**
+     * Restores shooting capability after a function switch back to Remote Shooting. A switch can drop
+     * record mode, so when the camera no longer advertises live view it re-enters record mode, claiming
+     * ownership only on an explicit success (mirroring [initialize]). Returns true when live view is
+     * available afterwards.
+     */
+    suspend fun ensureShootingMode(): Boolean {
+        refresh()
+        if("startLiveview" in state.apis) return true
+        if("startRecMode" !in state.apis) return false
+        return try {
+            recMode = RecModeOwnership.Uncertain
+            call("startRecMode")
+            recMode = RecModeOwnership.Active
+            for(attempt in 0 until 10) {
+                delay(400); refresh()
+                if("startLiveview" in state.apis || "actTakePicture" in state.apis) return true
+            }
+            "startLiveview" in state.apis || "actTakePicture" in state.apis
+        } catch(e: CancellationException) { throw e }
+        catch(_: Exception) { recMode = RecModeOwnership.None; false }
     }
     /**
      * End sequence for a normal disconnect: stop live view, then leave record mode only when this app

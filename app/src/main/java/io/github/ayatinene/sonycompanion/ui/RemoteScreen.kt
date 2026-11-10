@@ -33,6 +33,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.ayatinene.sonycompanion.data.*
+import kotlinx.coroutines.launch
 
 private val workspaceShape=RoundedCornerShape(10.dp)
 private val scrim=Color.Black.copy(alpha=0.45f)
@@ -49,13 +50,16 @@ data class RemoteActions(
     val onFocus:()->Unit,
     val onCapture:()->Unit,
     val onMovie:()->Unit,
-    val onSetSetting:(String,String)->Unit
+    val onSetSetting:(String,String)->Unit,
+    val onOpenGallery:()->Unit = {}
 )
 
 @Composable fun RemoteScreen(state:AppState,c:CompanionController,snackbar:SnackbarHostState,onBack:()->Unit,openWifi:()->Unit) {
     val image by c.frame.collectAsStateWithLifecycle()
     var grid by rememberSaveable { mutableStateOf(false) }
     var advanced by rememberSaveable { mutableStateOf(false) }
+    var galleryPrompt by rememberSaveable { mutableStateOf(false) }
+    val scope=rememberCoroutineScope()
     // Only the production capture page drives hardware rotation; RemoteWorkspace stays injectable so
     // its tests can keep exercising explicit portrait/landscape sizes. The host is keyed on the
     // Activity so recomposition never rebuilds it (which would restart the effect every frame).
@@ -67,9 +71,21 @@ data class RemoteActions(
     val insets=rememberWorkspaceInsets()
     RemoteWorkspace(state,image,grid,insets,RemoteActions(
         onBack=onBack,onDisconnect=c::endSession,onToggleGrid={grid=!grid},onTools={advanced=true},
-        onFocus=c::focus,onCapture=c::capture,onMovie=c::movie,onSetSetting=c::setSetting),snackbar)
+        onFocus=c::focus,onCapture=c::capture,onMovie=c::movie,onSetSetting=c::setSetting,
+        onOpenGallery={
+            if(state.remote.canBrowseGallery) galleryPrompt=true
+            else scope.launch { snackbar.showSnackbar(REMOTE_GALLERY_UNSUPPORTED) }
+        }),snackbar)
     if(advanced) CaptureTools(state,c,onDismiss={advanced=false},openWifi=openWifi)
+    if(galleryPrompt) AlertDialog(
+        onDismissRequest={galleryPrompt=false},
+        title={Text("进入相机图库？")},
+        text={Text("进入相机图库时将暂时停止实时取景和遥控拍摄，返回拍摄后可继续使用。")},
+        confirmButton={TextButton(onClick={galleryPrompt=false;c.openRemoteGallery()}){Text("进入")}},
+        dismissButton={TextButton(onClick={galleryPrompt=false}){Text("取消")}})
 }
+
+internal const val REMOTE_GALLERY_UNSUPPORTED="当前机内应用不支持相机图库，可使用 JPEG 传输或原文件连接。"
 
 /**
  * Portrait stacks header / frame / panel so controls never cover the picture; landscape keeps the frame
@@ -144,6 +160,13 @@ data class RemoteActions(
         Spacer(Modifier.width(6.dp))
         Row(Modifier.clip(workspaceShape).background(scrim).padding(2.dp),verticalAlignment=Alignment.CenterVertically) {
             IconToggleButton(checked=grid,onCheckedChange={actions.onToggleGrid()}) { Icon(Icons.Outlined.Grid3x3,"构图网格",tint=Color.White) }
+            // Blocked while shooting, recording, interval shooting or transferring; the backend re-checks
+            // the exact status, so the UI never gates on a strict idle requirement.
+            val recording=RemoteGalleryPolicy.isRecording(state.remote.status)
+            val canGallery=state.connected&&!state.connecting&&!state.busy&&!state.transferring&&state.intervalRemaining==0&&!recording
+            IconButton(onClick=actions.onOpenGallery,enabled=canGallery,modifier=Modifier.testTag("remote-gallery-entry")) {
+                Icon(Icons.Outlined.PhotoAlbum,"相机图库",tint=if(canGallery)Color.White else Color.DarkGray)
+            }
             IconButton(onClick=actions.onTools) { Icon(Icons.Outlined.Tune,"拍摄工具",tint=Color.White) }
             val canDisconnect=!state.transferring&&!state.connecting
             IconButton(onClick=actions.onDisconnect,enabled=canDisconnect) { Icon(Icons.Outlined.LinkOff,"断开相机",tint=if(canDisconnect)Color.White else Color.DarkGray) }

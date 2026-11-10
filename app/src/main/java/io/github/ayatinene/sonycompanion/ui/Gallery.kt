@@ -19,6 +19,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.ayatinene.sonycompanion.data.*
@@ -41,6 +42,14 @@ data class GalleryActions(
     val setScanPaused: (Boolean) -> Unit = {},
     val thumbnail: suspend (CameraFile, String?, Long) -> Bitmap? = { _, _, _ -> null },
     val preview: suspend (CameraFile, String?, Long) -> Bitmap? = { _, _, _ -> null },
+    /** Remote same-connection gallery: leave the gallery and restore the capture page. */
+    val returnToCapture: () -> Unit = {},
+    /** Remote same-connection gallery: append the next page of content items. */
+    val loadMore: () -> Unit = {},
+    /** Dispatch a refresh for the current mode (used by the remote gallery error retry). */
+    val refreshRemoteGallery: () -> Unit = {},
+    /** Re-establish the current session; offered when the gallery cannot recover in place. */
+    val reconnect: () -> Unit = {},
 )
 
 /** Forwards to the controller with the scope and generation captured by the caller. */
@@ -55,25 +64,46 @@ fun CompanionController.galleryActions(): GalleryActions = GalleryActions(
     setScanPaused = ::setScanPaused,
     thumbnail = { file, scope, generation -> thumbnail(file, scope, generation) },
     preview = { file, scope, generation -> cameraPreview(file, scope, generation) },
+    returnToCapture = ::returnToRemoteCapture,
+    loadMore = ::loadMoreRemoteFiles,
+    refreshRemoteGallery = ::refreshCameraFiles,
+    reconnect = ::reconnect,
 )
 
 /** The file under preview plus the session it was opened against; never re-read from the controller. */
 private data class GalleryPreview(val id: String, val scope: String?, val generation: Long)
 
 @Composable internal fun CameraGallery(state: AppState, actions: GalleryActions) {
-    if (!state.connected || state.mode == CameraMode.REMOTE) {
+    val remote = state.mode == CameraMode.REMOTE
+    if (!state.connected || (remote && !state.remote.galleryActive)) {
         EmptyState(Icons.Outlined.SdCard, "相机图库", "从首页连接 JPEG 传输，或已完成登记的 RAW / 原文件模式。")
         return
     }
-    // Selection and preview are tied to the session generation and the browsed folder, so a
-    // reconnect or a JPEG directory change starts clean.
-    var selected by remember(state.sessionGeneration, state.folder) { mutableStateOf(setOf<String>()) }
-    var detail by remember(state.sessionGeneration, state.folder) { mutableStateOf<CameraFile?>(null) }
-    var preview by remember(state.sessionGeneration, state.folder) { mutableStateOf<GalleryPreview?>(null) }
+    // Selection, detail and preview follow the session and the same-connection mode epoch, so a
+    // reconnect, a directory change or a gallery<->shooting switch never leaves a stale window open.
+    var selected by remember(state.sessionGeneration, state.remote.epoch, state.folder) { mutableStateOf(setOf<String>()) }
+    var detail by remember(state.sessionGeneration, state.remote.epoch, state.folder) { mutableStateOf<CameraFile?>(null) }
+    var preview by remember(state.sessionGeneration, state.remote.epoch, state.folder) { mutableStateOf<GalleryPreview?>(null) }
     var filter by rememberSaveable { mutableStateOf("全部") }
     var sortName by rememberSaveable { mutableStateOf(GallerySort.Newest.name) }
     var layoutName by rememberSaveable { mutableStateOf(GalleryLayout.Grid.name) }
     var sizeChoice by rememberSaveable { mutableStateOf(JpegSize.MAXIMUM.name) }
+    // The two switch directions are told apart by the switch target, not the camera's current function:
+    // a camera that already reports Contents Transfer (a retry or a restart) must still read as entering
+    // the gallery, so the label never mistakes an entry for a return.
+    val returning = isReturningToCapture(remote, state.remote.remoteSwitching, state.remote.switchTarget)
+    var returnFailed by remember { mutableStateOf(false) }
+    var wasReturning by remember { mutableStateOf(false) }
+    var galleryError by remember(state.sessionGeneration, state.remote.epoch) { mutableStateOf<String?>(null) }
+    LaunchedEffect(returning) { if (returning) wasReturning = true }
+    LaunchedEffect(state.remote.loadingMore) { if (state.remote.loadingMore) galleryError = null }
+    LaunchedEffect(state.remote.remoteSwitching) { if (state.remote.remoteSwitching) returnFailed = false }
+    LaunchedEffect(state.error) {
+        val message = state.error
+        if (message != null) {
+            if (wasReturning) { returnFailed = true; wasReturning = false } else galleryError = message
+        }
+    }
     val sort = GallerySort.entries.firstOrNull { it.name == sortName } ?: GallerySort.Newest
     val layout = GalleryLayout.entries.firstOrNull { it.name == layoutName } ?: GalleryLayout.Grid
     // The grid and the list keep separate scroll positions; a switch re-anchors on the item first
@@ -131,7 +161,20 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal=12.dp), verticalAlignment=Alignment.CenterVertically) {
             if (state.mode == CameraMode.JPEG) IconButton(onClick=actions.root, enabled=!state.busy && !state.transferring) { Icon(Icons.Outlined.FolderOpen, "返回根目录") }
-            Text("相机图库", Modifier.weight(1f), style=MaterialTheme.typography.titleSmall, maxLines=1, overflow=TextOverflow.Ellipsis)
+            Text(if (remote) "已连接 · 相机图库" else "相机图库", Modifier.weight(1f), style=MaterialTheme.typography.titleSmall, maxLines=1, overflow=TextOverflow.Ellipsis)
+            if (remote) TextButton(
+                onClick={ returnFailed=false; actions.returnToCapture() },
+                enabled=!state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore && !state.busy,
+                modifier=Modifier.testTag("remote-gallery-return")) {
+                Text(if (returning) "正在返回拍摄…" else "返回拍摄")
+            }
+        }
+        if (remote && state.transferring) Text("正在下载文件，请先等待完成或取消下载后再返回拍摄。",
+            Modifier.padding(horizontal=16.dp, vertical=4.dp), style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.onSurfaceVariant)
+        if (remote && returnFailed && !returning) Row(Modifier.fillMaxWidth().padding(horizontal=16.dp, vertical=4.dp),
+            verticalAlignment=Alignment.CenterVertically) {
+            Text("无法返回拍摄模式，请重试或重新连接相机。", Modifier.weight(1f), style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.error)
+            TextButton(onClick=actions.reconnect) { Text("重新连接相机") }
         }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=12.dp),
             horizontalArrangement=Arrangement.spacedBy(4.dp), verticalAlignment=Alignment.CenterVertically) {
@@ -166,7 +209,7 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
         }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=16.dp),
             horizontalArrangement=Arrangement.spacedBy(6.dp), verticalAlignment=Alignment.CenterVertically) {
-            listOf("全部", "JPEG", "ARW").filter { state.mode == CameraMode.COMPUTER || it != "ARW" }.forEach { name ->
+            listOf("全部", "JPEG", "ARW").filter { state.mode != CameraMode.JPEG || it != "ARW" }.forEach { name ->
                 FilterChip(selected = filter == name, onClick = { if (filter != name) { filter = name; requestTop() } }, label = { Text(name) })
             }
             if (state.mode == CameraMode.JPEG) {
@@ -177,15 +220,46 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
             }
         }
         if (state.mode == CameraMode.JPEG) Text("仅下载相机实际提供的 JPEG 尺寸。ARW 条目的 JPEG 是预览。", Modifier.padding(horizontal=16.dp, vertical=4.dp), style=MaterialTheme.typography.bodySmall)
+        if (remote) Text("可按 JPEG / ARW 筛选并下载相机原文件。", Modifier.padding(horizontal=16.dp, vertical=4.dp), style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.onSurfaceVariant)
         if (state.mode == CameraMode.COMPUTER) ScanBar(state, actions)
         if (hiddenSelected > 0) Text("另有 $hiddenSelected 项被筛选隐藏，不会下载。", Modifier.padding(horizontal=16.dp, vertical=4.dp), style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.onSurfaceVariant)
         if (state.scan.phase == ScanPhase.Scanning) Text("查找仍在进行，列表会继续增加。", Modifier.padding(horizontal=16.dp, vertical=4.dp), style=MaterialTheme.typography.labelSmall, color=MaterialTheme.colorScheme.onSurfaceVariant)
 
-        if (files.isEmpty()) {
+        if (remote && returning) {
+            Box(Modifier.weight(1f).fillMaxWidth().testTag("remote-gallery-returning"), contentAlignment=Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        } else if (remote && state.remote.remoteSwitching) {
+            Box(Modifier.weight(1f).fillMaxWidth().testTag("remote-gallery-switching"), contentAlignment=Alignment.Center) {
+                Column(horizontalAlignment=Alignment.CenterHorizontally, verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                    CircularProgressIndicator()
+                    Text("正在打开相机图库…", style=MaterialTheme.typography.bodyMedium)
+                }
+            }
+        } else if (files.isEmpty()) {
             val discovered = state.files.count { !it.container }
-            val empty = if (discovered == 0) galleryEmptyState(state.mode, state.scan)
-                else GalleryEmpty("没有符合筛选的文件", "试试切换上方的筛选条件。")
-            Box(Modifier.weight(1f)) { EmptyState(emptyIcon(state), empty.title, empty.text) }
+            if (remote) {
+                val total = state.remote.totalFiles
+                // Only a failed scan or a reported error is a failure; an empty page is not.
+                val failed = state.scan.phase == ScanPhase.Failed || galleryError != null
+                when {
+                    discovered > 0 -> Box(Modifier.weight(1f)) { EmptyState(emptyIcon(state), "没有符合筛选的文件", "试试切换上方的筛选条件。") }
+                    failed -> Box(Modifier.weight(1f)) { RemoteGalleryError(actions, onReturn={ actions.returnToCapture() }) }
+                    total != null && total == 0 -> Box(Modifier.weight(1f)) { EmptyState(Icons.Outlined.Image, "没有照片", "相机存储卡里没有可显示的文件。") }
+                    state.remote.loadingMore -> Box(Modifier.weight(1f)) { EmptyState(Icons.Outlined.Search, "正在加载…", "正在读取相机文件，请稍候…") }
+                    else -> {
+                        // An unsupported first page (movie / no original) must still offer the next page.
+                        val more = state.remote.hasMoreFiles
+                        Box(Modifier.weight(1f)) { EmptyState(Icons.Outlined.Image, "没有可显示的照片",
+                            if (more) "当前已加载的内容中没有可显示的照片，可继续加载更多。" else "相机存储卡里没有可显示的文件。") }
+                        RemoteLoadMore(state, actions)
+                    }
+                }
+            } else {
+                val empty = if (discovered == 0) galleryEmptyState(state.mode, state.scan)
+                    else GalleryEmpty("没有符合筛选的文件", "试试切换上方的筛选条件。")
+                Box(Modifier.weight(1f)) { EmptyState(emptyIcon(state), empty.title, empty.text) }
+            }
         } else if (layout == GalleryLayout.Grid) {
             LazyVerticalGrid(state=gridState, columns=GridCells.Adaptive(120.dp), modifier=Modifier.weight(1f).testTag("gallery-grid"),
                 contentPadding=PaddingValues(12.dp), verticalArrangement=Arrangement.spacedBy(8.dp), horizontalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -205,6 +279,7 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
                         Text(if (file.container) "文件夹" else (if (file.raw) "ARW · " else "JPEG · ")+bytes(effectiveFileSize(file)), Modifier.padding(start=8.dp, end=8.dp, bottom=8.dp), style=MaterialTheme.typography.labelSmall)
                     }
                 }
+                if (remote) item(span={ GridItemSpan(maxLineSpan) }) { RemoteLoadMore(state, actions) }
             }
         } else {
             LazyColumn(state=listState, modifier=Modifier.weight(1f).testTag("gallery-list"),
@@ -230,18 +305,19 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
                         if (file.id in selectedVisible) Icon(Icons.Outlined.CheckCircle, "已选择", tint=MaterialTheme.colorScheme.primary)
                     }
                 }
+                if (remote) item { RemoteLoadMore(state, actions) }
             }
         }
         if (unsupported > 0) Text("所选的 $unsupported 个文件未提供${selectedSize.title}，请更改尺寸或取消选择。", Modifier.padding(horizontal=16.dp), style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.error)
         if (selectedVisible.isNotEmpty()) Button(onClick={
             val choices = selectedFiles.map { f ->
-                if (f.handle != null) f else {
+                if (f.hasOriginalFile) f else {
                     val resource = f.jpegResource(selectedSize)
                     f.copy(resources=listOfNotNull(resource), size=resource?.size ?: 0)
                 }
             }
             actions.enqueue(choices, generation); selected = emptySet()
-        }, Modifier.fillMaxWidth().padding(horizontal=16.dp), enabled=canDownload && unsupported == 0 && selectedFiles.isNotEmpty(), shape=galleryShape) { Text("下载 ${selectedFiles.size} 个文件") }
+        }, Modifier.fillMaxWidth().padding(horizontal=16.dp), enabled=canDownload && unsupported == 0 && selectedFiles.isNotEmpty() && !returning && !state.remote.remoteSwitching, shape=galleryShape) { Text("下载 ${selectedFiles.size} 个文件") }
         QueuePanel(state, actions)
     }
     preview?.let { request ->
@@ -250,17 +326,17 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
             // The file left the listing (rescan or directory change): close instead of crashing.
             LaunchedEffect(request) { preview = null }
         } else {
-            val previewActionsEnabled = canDownload && !state.transferring
+            val previewActionsEnabled = canDownload && !state.transferring && !returning && !state.remote.remoteSwitching
             PhotoViewer(pictures.map { file -> ViewerImage(file.id, file.name,
-                if (file.raw && file.handle != null) "相机缩略预览 · ARW 原文件可单独下载" else "相机预览 · 下载后保存") }, request.id,
+                if (file.raw && file.hasOriginalFile) "相机缩略预览 · ARW 原文件可单独下载" else "相机预览 · 下载后保存") }, request.id,
                 refreshKey = request.generation to state.transferring, onDismiss={ preview = null },
                 load={ image -> pictures.firstOrNull { it.id == image.key }?.let { file -> actions.preview(file, request.scope, request.generation) } }) { image ->
                 pictures.firstOrNull { it.id == image.key }?.let { file ->
                     TextButton(onClick={ detail = file }) { Icon(Icons.Outlined.Info, null); Spacer(Modifier.width(4.dp)); Text("信息") }
                     TextButton(onClick={
                         val resource = file.jpegResource(selectedSize)
-                        actions.enqueue(listOf(if (file.handle != null) file else file.copy(resources=listOfNotNull(resource), size=resource?.size ?: 0)), request.generation)
-                    }, enabled=previewActionsEnabled && (file.handle != null || file.jpegResource(selectedSize) != null)) { Icon(Icons.Outlined.FileDownload, null); Spacer(Modifier.width(4.dp)); Text("下载") }
+                        actions.enqueue(listOf(if (file.hasOriginalFile) file else file.copy(resources=listOfNotNull(resource), size=resource?.size ?: 0)), request.generation)
+                    }, enabled=previewActionsEnabled && (file.hasOriginalFile || file.jpegResource(selectedSize) != null)) { Icon(Icons.Outlined.FileDownload, null); Spacer(Modifier.width(4.dp)); Text("下载") }
                     TextButton(onClick={ selected = selected + file.id; preview = null }, enabled=previewActionsEnabled) { Icon(Icons.Outlined.CheckCircleOutline, null); Spacer(Modifier.width(4.dp)); Text("选择") }
                 }
             }
@@ -269,7 +345,7 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     detail?.let { file -> AlertDialog(onDismissRequest={ detail = null }, title={ Text(file.name) }, text={
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement=Arrangement.spacedBy(8.dp)) {
             galleryTimeText(file.date)?.let { Text(it) }
-            if (file.handle != null) Text("${if (file.raw) "ARW 原文件" else "JPEG 原文件"} · ${bytes(file.size)}")
+            if (file.hasOriginalFile) Text("${if (file.raw) "ARW 原文件" else "JPEG 原文件"} · ${bytes(file.size)}")
             else {
                 if (file.raw) Text("此 ARW 条目提供的可下载资源为 JPEG 预览。")
                 file.resources.filter { it.isJpeg }.distinctBy { it.url }.forEach { resource ->
@@ -290,6 +366,43 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
 /** Format · size · local capture time for the list row; the time is omitted when it cannot be read. */
 private fun gallerySecondaryText(file: CameraFile): String = if (file.container) "文件夹"
     else listOfNotNull(if (file.raw) "ARW" else "JPEG", bytes(effectiveFileSize(file)), galleryTimeText(file.date)).joinToString(" · ")
+
+/** Footer for the remote gallery: how much is loaded, the next-page entry, and a retry after a failed page. */
+@Composable private fun RemoteLoadMore(state: AppState, actions: GalleryActions) {
+    val loaded = state.remote.loadedContentCount
+    val total = state.remote.totalFiles
+    Column(Modifier.fillMaxWidth().padding(12.dp).testTag("remote-gallery-load-more"),
+        horizontalAlignment=Alignment.CenterHorizontally, verticalArrangement=Arrangement.spacedBy(6.dp)) {
+        Text(if (total != null && total > 0) "已加载 $loaded / $total 项" else "已加载最近 $loaded 项",
+            style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.onSurfaceVariant)
+        when {
+            state.remote.loadingMore -> {
+                Text("正在加载…", style=MaterialTheme.typography.labelMedium)
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+            state.remote.hasMoreFiles -> {
+                if (state.remote.loadMoreFailed) Text("加载更多失败，请重试。", style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.error)
+                TextButton(onClick=actions.loadMore,
+                    enabled=!state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore) { Text("加载更多（20 项）") }
+            }
+        }
+    }
+}
+
+/** Recovery for a remote gallery that could not be read; stays in the gallery so the user chooses. */
+@Composable private fun RemoteGalleryError(actions: GalleryActions, onReturn: () -> Unit) {
+    Column(Modifier.fillMaxSize().padding(28.dp), verticalArrangement=Arrangement.Center, horizontalAlignment=Alignment.CenterHorizontally) {
+        Icon(Icons.Outlined.CloudOff, null, Modifier.size(46.dp), tint=MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(16.dp))
+        Text("无法读取相机文件，请重试或返回拍摄。", style=MaterialTheme.typography.titleMedium, textAlign=TextAlign.Center)
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick=actions.refreshRemoteGallery) { Text("重试") }
+            TextButton(onClick=onReturn) { Text("返回拍摄") }
+            TextButton(onClick=actions.reconnect) { Text("重新连接相机") }
+        }
+    }
+}
 
 @Composable private fun ScanBar(state: AppState, actions: GalleryActions) {
     val scan = state.scan

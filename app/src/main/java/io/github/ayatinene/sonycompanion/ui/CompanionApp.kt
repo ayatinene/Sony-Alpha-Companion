@@ -63,7 +63,7 @@ private fun openAppSettings(context:Context) {
     var nav by rememberSaveable(stateSaver=ShellNavSaver) { mutableStateOf(ShellNav()) }
     var theme by remember { mutableStateOf(controller.prefs.getString("theme","system")!!) }
     var dynamic by remember { mutableStateOf(controller.prefs.getBoolean("dynamic",false)) }
-    val captureReady=state.connected && state.mode==CameraMode.REMOTE
+    val captureReady=state.connected && state.mode==CameraMode.REMOTE && !state.remote.galleryActive
     val immersive=nav.destination==Destination.Capture && captureReady
     val shown=when {
         nav.destination==Destination.Capture && !captureReady->Destination.Home
@@ -131,12 +131,12 @@ private fun openAppSettings(context:Context) {
     LaunchedEffect(Unit) { reconcileRevokedGeotagging() }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { reconcileRevokedGeotagging() }
     LaunchedEffect(state.error) { state.error?.let { snackbar.showSnackbar(it,duration=SnackbarDuration.Long); controller.clearError() } }
-    LaunchedEffect(state.connected,state.connecting,state.mode) { nav=nav.observe(state.connected,state.connecting,state.mode) }
+    LaunchedEffect(state.connected,state.connecting,state.mode,state.remote.galleryActive) { nav=nav.observe(state.connected,state.connecting,state.mode,state.remote.galleryActive) }
     MaterialTheme(colorScheme=colors,shapes=Shapes(small=shape,medium=shape,large=RoundedCornerShape(16.dp))) {
         if(immersive) {
             RemoteScreen(state,controller,snackbar,onBack={ nav=nav.copy(destination=Destination.Home,entryTarget=null) },openWifi=openWifi)
         } else {
-            val items=destinationsFor(state.connected,state.mode)
+            val items=destinationsFor(state.connected,state.mode,state.remote.galleryActive)
             Scaffold(contentWindowInsets=WindowInsets.safeDrawing,snackbarHost={SnackbarHost(snackbar)},topBar={
                 TopAppBar(title={ Column {
                     Text("Alpha Companion",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold)
@@ -153,7 +153,7 @@ private fun openAppSettings(context:Context) {
                     if(state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                     when(shown) {
                         Destination.Home,Destination.Capture->Home(state,controller,
-                            onOpenWorkspace={ nav=nav.copy(destination=workspaceFor(state.mode),entryTarget=null) },
+                            onOpenWorkspace={ nav=nav.copy(destination=workspaceFor(state.mode,state.remote.galleryActive),entryTarget=null) },
                             onConnect=connectWithPermissions,permissions=requestPermissions)
                         Destination.Gallery->CameraGallery(state,controller.galleryActions())
                         Destination.Local->LocalLibraryScreen(state,controller)
@@ -171,9 +171,10 @@ private fun openAppSettings(context:Context) {
         item { HomeStatusCard(state) }
         if(state.connected) {
             item { Button(onClick=onOpenWorkspace,shape=shape,modifier=Modifier.fillMaxWidth()) {
-                Icon(if(state.mode==CameraMode.REMOTE)Icons.Outlined.CameraAlt else Icons.Outlined.PhotoAlbum,null)
+                val remoteCapture=state.mode==CameraMode.REMOTE&&!state.remote.galleryActive
+                Icon(if(remoteCapture)Icons.Outlined.CameraAlt else Icons.Outlined.PhotoAlbum,null)
                 Spacer(Modifier.width(8.dp))
-                Text(if(state.mode==CameraMode.REMOTE) "进入拍摄" else "打开相机图库")
+                Text(if(remoteCapture) "进入拍摄" else "打开相机图库")
             } }
             item { OutlinedButton(onClick={ state.mode?.let(onConnect) },enabled=!state.connecting&&!state.busy&&!state.transferring,shape=shape,modifier=Modifier.fillMaxWidth()) { Text("重新连接相机") } }
             item { OutlinedButton(onClick=c::endSession,enabled=!state.busy&&!state.transferring,shape=shape,modifier=Modifier.fillMaxWidth()) { Icon(Icons.Outlined.LinkOff,null);Spacer(Modifier.width(8.dp));Text("断开相机") } }

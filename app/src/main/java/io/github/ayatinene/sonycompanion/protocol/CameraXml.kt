@@ -27,12 +27,17 @@ object CameraXml {
         val root = document(xml)
         val urlBase = root.text("URLBase").takeIf { it.isNotBlank() }?.let(location::resolve) ?: location
         var remote: URI? = null
+        var avContent: URI? = null
         root.all("X_ScalarWebAPI_Service").forEach { e ->
-            if (e.text("X_ScalarWebAPI_ServiceType") == "camera") {
-                val advertised = e.text("X_ScalarWebAPI_ActionList_URL")
-                if (advertised.isNotBlank()) {
+            val advertised = e.text("X_ScalarWebAPI_ActionList_URL")
+            when (e.text("X_ScalarWebAPI_ServiceType").trim()) {
+                "camera" -> if (advertised.isNotBlank()) {
                     val base = urlBase.resolve(advertised).toString().trimEnd('/')
                     remote = URI(if (base.endsWith("/camera")) base else "$base/camera")
+                }
+                "avContent" -> if (advertised.isNotBlank()) {
+                    val base = urlBase.resolve(advertised).toString().trimEnd('/')
+                    avContent = runCatching { URI(if (base.endsWith("/avContent")) base else "$base/avContent") }.getOrNull()
                 }
             }
         }
@@ -43,7 +48,7 @@ object CameraXml {
             location, remote, control("ContentDirectory"), control("XPushList"),
             root.all("service").firstOrNull { it.text("serviceType").contains(":DigitalImaging:") }
                 ?.text("SCPDURL")?.takeIf(String::isNotBlank)?.let(urlBase::resolve),
-            udn=root.text("UDN"), serial=root.text("serialNumber"))
+            udn=root.text("UDN"), serial=root.text("serialNumber"), avContent=avContent)
     }
     fun identity(xml: String): CameraIdentity {
         val root=document(xml)

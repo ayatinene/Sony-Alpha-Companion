@@ -11,7 +11,9 @@ enum class CameraMode(val title: String, val instruction: String) {
 data class Device(val name: String, val model: String, val description: URI,
     val remote: URI? = null, val content: URI? = null, val push: URI? = null,
     val digitalImaging: URI? = null, val identity: CameraIdentity = CameraIdentity(),
-    val udn: String = "", val serial: String = "") {
+    val udn: String = "", val serial: String = "",
+    /** avContent JSON-RPC action URL parsed from the ScalarWebAPI service list, when advertised. */
+    val avContent: URI? = null) {
     val displayName: String get() = identity.model.ifBlank { model.takeUnless { it.isBlank() || it=="SonyImagingDevice" } ?: name }
     val cameraId: String? get() = stableCameraId(udn, serial, model)
 }
@@ -24,13 +26,60 @@ data class Setting(val key: String, val label: String, val current: String,
         String.format(Locale.US, "%+.1f EV", (value.toIntOrNull() ?: 0).toDouble() / evStep) else value
 }
 data class RemoteState(val apis: Set<String> = emptySet(), val settings: List<Setting> = emptyList(),
-    val status: String = "", val application: String = "", val eventVersion: String = "1.0")
+    val status: String = "", val application: String = "", val eventVersion: String = "1.0",
+    /** Same-connection gallery capability: the camera advertises setCameraFunction + avContent and
+     * getSupportedCameraFunction confirms both functions, gated by the advertised method version. */
+    val canBrowseGallery: Boolean = false,
+    /** True from the moment the gallery is requested until a successful return to shooting. */
+    val galleryActive: Boolean = false,
+    /** A setCameraFunction switch is in progress. */
+    val remoteSwitching: Boolean = false,
+    /** A page fetch is in flight. */
+    val loadingMore: Boolean = false,
+    /** The last page fetch failed; the footer offers a retry without masking other errors. */
+    val loadMoreFailed: Boolean = false,
+    /** More avContent pages are available for the current source. */
+    val hasMoreFiles: Boolean = false,
+    /** Declared content count for the current source, or null when the camera does not report one. */
+    val totalFiles: Int? = null,
+    /** Number of content items loaded so far (not the expanded per-original file count). */
+    val loadedContentCount: Int = 0,
+    /** Current camera function as reported by getCameraFunction / getEvent. */
+    val remoteFunction: String = "",
+    /** Target of an in-progress switch (Remote Shooting / Contents Transfer); empty when idle. Lets the
+     * UI keep the switch direction even if its own local state is rebuilt. */
+    val switchTarget: String = "",
+    /** Bumped on every monitoring/mode transition so a stale same-connection loop cannot write. */
+    val epoch: Long = 0) {
+    /**
+     * Folds the camera-owned fields from a [RemoteCamera] snapshot (apis / settings / status /
+     * application / eventVersion) into this app-owned state. The sub-mode, capability and pagination
+     * fields are never produced by the camera, so a wholesale replace would reset them and make the
+     * gallery entry unreachable after the first event poll.
+     */
+    fun mergeCameraState(camera: RemoteState): RemoteState = camera.copy(
+        canBrowseGallery = canBrowseGallery, galleryActive = galleryActive, remoteSwitching = remoteSwitching,
+        loadingMore = loadingMore, loadMoreFailed = loadMoreFailed, hasMoreFiles = hasMoreFiles, totalFiles = totalFiles,
+        loadedContentCount = loadedContentCount, remoteFunction = remoteFunction,
+        switchTarget = switchTarget, epoch = epoch)
+}
 data class Resource(val url: String, val mime: String = "image/jpeg", val size: Long = 0,
     val resolution: String = "", val profile: String = "")
 data class CameraFile(val id: String, val name: String, val resources: List<Resource> = emptyList(),
     val thumbnail: String? = null, val date: String = "", val container: Boolean = false,
-    val size: Long = 0, val raw: Boolean = false, val handle: Long? = null, val parent: String = "") {
+    val size: Long = 0, val raw: Boolean = false, val handle: Long? = null, val parent: String = "",
+    /** Explicit: this entry is a downloadable original (avContent), not merely a preview. */
+    val original: Boolean = false,
+    /** Normalised original format: "jpeg" / "arw" / "" when unknown. */
+    val format: String = "",
+    /** Download transport for an original: "http" / "ptp" / "" when not an original. */
+    val protocol: String = "") {
     fun bestResource(): Resource? = jpegResource()
+    /** True when a full original can be downloaded: a PTP handle or an avContent HTTP original.
+     * The legacy JPEG mode leaves this false so the UI keeps replacing the resource by size. */
+    val hasOriginalFile: Boolean get() = handle != null || original
+    /** The HTTP original to download for an avContent entry; null for PTP (which uses [handle]). */
+    val originalResource: Resource? get() = if (handle == null && original) resources.firstOrNull() else null
 }
 /** A queued COMPUTER file must uniquely match the current authoritative listing; a stale capture with
  * the same id but different metadata (size/date/parent/name) is never enqueued. */
