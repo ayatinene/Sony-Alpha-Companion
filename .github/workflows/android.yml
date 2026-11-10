@@ -15,6 +15,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Test release gating logic
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*.py' -v
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -69,7 +74,9 @@ jobs:
         if: github.event_name != 'pull_request'
         with:
           name: Alpha-Companion-Debug-APK
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            app/build/outputs/apk/debug/AlphaCompanion-*.apk
+            app/build/build-metadata.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()

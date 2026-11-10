@@ -13,7 +13,7 @@
 
 ## 安装与连接
 
-在 [GitHub Actions](https://github.com/ayatinene/Sony-Alpha-Companion/actions) 打开最近一次成功的构建，下载 `Alpha-Companion-Debug-APK`，解压后安装 APK（支持 Android 10 及以上）。
+在 [GitHub Releases](https://github.com/ayatinene/Sony-Alpha-Companion/releases) 下载最新预发布版（Pre-release）中的 `AlphaCompanion-<版本>-<短SHA>-debug.apk` 直接安装（支持 Android 10 及以上）；也可在 [GitHub Actions](https://github.com/ayatinene/Sony-Alpha-Companion/actions) 打开最近一次成功的构建，下载 `Alpha-Companion-Debug-APK` 压缩包解压安装。
 
 仓库构建的预览版使用固定签名，后续版本可直接覆盖安装；如果手机上装过早期临时签名版本，第一次切换时需要先卸载旧版，详见 [APK 签名说明](docs/SIGNING.md)。
 
@@ -44,7 +44,7 @@
 ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
-Windows 使用 `gradlew.bat`，构建产物位于 `app/build/outputs/apk/debug/app-debug.apk`。
+Windows 使用 `gradlew.bat`，构建产物位于 `app/build/outputs/apk/debug/app-debug.apk`。构建时会自动将当前 Git 短 SHA（本地有未提交改动时追加 `-dirty`）写入应用的“设置 → 关于与许可”及诊断导出信息。
 
 ## 许可证
 
