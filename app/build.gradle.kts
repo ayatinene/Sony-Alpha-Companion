@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.ayatinene.sonycompanion"
         minSdk = 29
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.1.14-preview"
+        versionCode = 17
+        versionName = "0.1.16-preview"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     if (signingPath != null) {
@@ -49,6 +49,7 @@ dependencies {
     implementation(libs.coroutines)
     implementation(libs.okhttp)
     implementation(libs.exif)
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     debugImplementation(libs.compose.tooling)
     debugImplementation(libs.compose.test.manifest)
     androidTestImplementation(platform(libs.compose.bom))
@@ -61,3 +62,5 @@ dependencies {
     testImplementation(libs.mockwebserver)
     testImplementation(libs.coroutines.test)
 }
+
+

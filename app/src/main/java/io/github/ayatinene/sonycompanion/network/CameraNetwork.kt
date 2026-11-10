@@ -24,7 +24,7 @@ class CameraNetwork(private val context: Context) {
     fun gateway(network: Network): String? = manager.getLinkProperties(network)?.routes
         ?.firstOrNull { it.isDefaultRoute && it.gateway is Inet4Address }?.gateway?.hostAddress
 
-    suspend fun discover(network: Network, http: CameraHttp, remote: Boolean, manual: String, computer: Boolean = false): List<Device> = withContext(Dispatchers.IO) {
+    suspend fun discover(network: Network, http: CameraHttp, remote: Boolean, manual: String, computer: Boolean = false, pairingAuto: Boolean = false): List<Device> = withContext(Dispatchers.IO) {
         val wifi = context.getSystemService(WifiManager::class.java)
         val lock = wifi.createMulticastLock("alpha-discovery").apply { setReferenceCounted(false); acquire() }
         val locations = linkedSetOf<URI>()
@@ -38,7 +38,7 @@ class CameraNetwork(private val context: Context) {
             DatagramSocket(null).use { socket ->
                 socket.reuseAddress = true
                 socket.bind(InetSocketAddress(0)); network.bindSocket(socket)
-                val targets = if (remote) listOf("urn:schemas-sony-com:service:ScalarWebAPI:1") else if(computer) listOf("urn:microsoft-com:service:MtpNullService:1") else listOf("ssdp:all")
+                val targets = if(pairingAuto) listOf("ssdp:all", "urn:schemas-sony-com:service:ScalarWebAPI:1") else if (remote) listOf("urn:schemas-sony-com:service:ScalarWebAPI:1") else if(computer) listOf("urn:microsoft-com:service:MtpNullService:1") else listOf("ssdp:all")
                 repeat(2) {
                     targets.forEach { st ->
                         val data = "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: $st\r\n\r\n".toByteArray()
@@ -59,7 +59,8 @@ class CameraNetwork(private val context: Context) {
             }
             val host = manual.takeIf { !it.contains("://") && it.isNotBlank() } ?: gateway(network)
             val fallback = if (!remote && !computer && host != null) URI("http://$host:64321/DmsDescPush.xml") else null
-            resolveCameraDescriptions(locations.toList(), fallback, remote, computer) { uri -> http.getText(uri.toString()) }
+            if(pairingAuto) resolveNfcCameraDescriptions(locations.toList()) { uri -> http.getText(uri.toString()) }
+            else resolveCameraDescriptions(locations.toList(), fallback, remote, computer) { uri -> http.getText(uri.toString()) }
         } finally { if(lock.isHeld) lock.release() }
     }
 }
@@ -83,6 +84,15 @@ suspend fun resolveCameraDescriptions(
     val active = resolve(advertised)
     if (active.isNotEmpty()) return active
     return if (fallback != null && fallback !in advertised) resolve(listOf(fallback)) else emptyList()
+}
+
+/** Automatic NFC routing uses current SSDP advertisements only, never a potentially stale fallback URL. */
+suspend fun resolveNfcCameraDescriptions(advertised: List<URI>, read: suspend (URI) -> String): List<Device> {
+    val descriptions = mutableMapOf<URI, String>()
+    suspend fun cached(uri: URI): String = descriptions[uri] ?: read(uri).also { descriptions[uri] = it }
+    val remote = resolveCameraDescriptions(advertised, null, true, read = ::cached)
+    val jpeg = resolveCameraDescriptions(advertised, null, false, read = ::cached)
+    return (remote + jpeg).distinctBy { Triple(it.description, it.remote, it.content) }
 }
 
 class CameraHttpError(val code: Int) : java.io.IOException("相机 HTTP $code")
@@ -177,3 +187,4 @@ class CameraHttp(network: Network? = null, private val trace: (String,String)->U
         pending.forEach(Call::cancel); client.dispatcher.cancelAll(); client.connectionPool.evictAll()
     }
 }
+

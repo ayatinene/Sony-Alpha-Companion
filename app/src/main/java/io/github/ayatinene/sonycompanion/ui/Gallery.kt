@@ -1,6 +1,7 @@
 package io.github.ayatinene.sonycompanion.ui
 
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
@@ -34,6 +35,7 @@ private val galleryShape = RoundedCornerShape(10.dp)
 data class GalleryActions(
     val browse: (String) -> Unit = {},
     val root: () -> Unit = {},
+    val up: () -> Unit = {},
     val enqueue: (List<CameraFile>, Long) -> Unit = { _, _ -> },
     val cancelTransfers: () -> Unit = {},
     val retryFailed: () -> Unit = {},
@@ -56,6 +58,7 @@ data class GalleryActions(
 fun CompanionController.galleryActions(): GalleryActions = GalleryActions(
     browse = ::browse,
     root = ::root,
+    up = ::up,
     enqueue = { files, generation -> enqueue(files, generation) },
     cancelTransfers = ::cancelTransfers,
     retryFailed = ::retryFailed,
@@ -95,6 +98,12 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     var returnFailed by remember { mutableStateOf(false) }
     var wasReturning by remember { mutableStateOf(false) }
     var galleryError by remember(state.sessionGeneration, state.remote.epoch) { mutableStateOf<String?>(null) }
+    // The photo dialog dismisses itself. Back in a directory returns one level instead of
+    // leaving the camera gallery; no connection restart is involved.
+    BackHandler(enabled=state.galleryPath.isNotEmpty() && preview==null && detail==null &&
+        !state.busy && !state.transferring && !state.remote.remoteSwitching) {
+        actions.up()
+    }
     LaunchedEffect(returning) { if (returning) wasReturning = true }
     LaunchedEffect(state.remote.loadingMore) { if (state.remote.loadingMore) galleryError = null }
     LaunchedEffect(state.remote.remoteSwitching) { if (state.remote.remoteSwitching) returnFailed = false }
@@ -160,11 +169,15 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal=12.dp), verticalAlignment=Alignment.CenterVertically) {
+            if (state.galleryPath.isNotEmpty()) IconButton(onClick=actions.up,
+                enabled=!state.busy && !state.transferring && !state.remote.remoteSwitching) {
+                Icon(Icons.Outlined.ArrowBack, "返回上一级")
+            }
             if (state.mode == CameraMode.JPEG) IconButton(onClick=actions.root, enabled=!state.busy && !state.transferring) { Icon(Icons.Outlined.FolderOpen, "返回根目录") }
             Text(if (remote) "已连接 · 相机图库" else "相机图库", Modifier.weight(1f), style=MaterialTheme.typography.titleSmall, maxLines=1, overflow=TextOverflow.Ellipsis)
             if (remote) TextButton(
                 onClick={ returnFailed=false; actions.returnToCapture() },
-                enabled=!state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore && !state.busy,
+                enabled=!state.transferring && !state.remote.remoteSwitching && !state.busy,
                 modifier=Modifier.testTag("remote-gallery-return")) {
                 Text(if (returning) "正在返回拍摄…" else "返回拍摄")
             }
@@ -210,7 +223,8 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=16.dp),
             horizontalArrangement=Arrangement.spacedBy(6.dp), verticalAlignment=Alignment.CenterVertically) {
             listOf("全部", "JPEG", "ARW").filter { state.mode != CameraMode.JPEG || it != "ARW" }.forEach { name ->
-                FilterChip(selected = filter == name, onClick = { if (filter != name) { filter = name; requestTop() } }, label = { Text(name) })
+                FilterChip(selected = filter == name, onClick = { if (filter != name) { filter = name; requestTop() } },
+                    label = { Text(name) }, modifier = Modifier.testTag("gallery-filter-$name"))
             }
             if (state.mode == CameraMode.JPEG) {
                 var menu by remember { mutableStateOf(false) }
@@ -276,7 +290,10 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
                             if (file.id in selectedVisible) Icon(Icons.Outlined.CheckCircle, "已选择", Modifier.align(Alignment.TopEnd).padding(6.dp), tint=MaterialTheme.colorScheme.primary)
                         }
                         Text(file.name, Modifier.padding(horizontal=8.dp, vertical=4.dp), style=MaterialTheme.typography.labelMedium, maxLines=1, overflow=TextOverflow.Ellipsis)
-                        Text(if (file.container) "文件夹" else (if (file.raw) "ARW · " else "JPEG · ")+bytes(effectiveFileSize(file)), Modifier.padding(start=8.dp, end=8.dp, bottom=8.dp), style=MaterialTheme.typography.labelSmall)
+                        Text(if (file.container) "文件夹" else listOfNotNull(
+                            if (file.raw) "ARW" else "JPEG",
+                            effectiveFileSize(file).takeIf { it > 0 }?.let(::bytes)
+                        ).joinToString(" · "), Modifier.padding(start=8.dp, end=8.dp, bottom=8.dp), style=MaterialTheme.typography.labelSmall)
                     }
                 }
                 if (remote) item(span={ GridItemSpan(maxLineSpan) }) { RemoteLoadMore(state, actions) }
@@ -345,7 +362,10 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
     detail?.let { file -> AlertDialog(onDismissRequest={ detail = null }, title={ Text(file.name) }, text={
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement=Arrangement.spacedBy(8.dp)) {
             galleryTimeText(file.date)?.let { Text(it) }
-            if (file.hasOriginalFile) Text("${if (file.raw) "ARW 原文件" else "JPEG 原文件"} · ${bytes(file.size)}")
+            if (file.hasOriginalFile) Text(listOfNotNull(
+                if (file.raw) "ARW 原文件" else "JPEG 原文件",
+                effectiveFileSize(file).takeIf { it > 0 }?.let(::bytes)
+            ).joinToString(" · "))
             else {
                 if (file.raw) Text("此 ARW 条目提供的可下载资源为 JPEG 预览。")
                 file.resources.filter { it.isJpeg }.distinctBy { it.url }.forEach { resource ->
@@ -365,7 +385,8 @@ private data class GalleryPreview(val id: String, val scope: String?, val genera
 
 /** Format · size · local capture time for the list row; the time is omitted when it cannot be read. */
 private fun gallerySecondaryText(file: CameraFile): String = if (file.container) "文件夹"
-    else listOfNotNull(if (file.raw) "ARW" else "JPEG", bytes(effectiveFileSize(file)), galleryTimeText(file.date)).joinToString(" · ")
+    else listOfNotNull(if (file.raw) "ARW" else "JPEG",
+        effectiveFileSize(file).takeIf { it > 0 }?.let(::bytes), galleryTimeText(file.date)).joinToString(" · ")
 
 /** Footer for the remote gallery: how much is loaded, the next-page entry, and a retry after a failed page. */
 @Composable private fun RemoteLoadMore(state: AppState, actions: GalleryActions) {
@@ -380,10 +401,10 @@ private fun gallerySecondaryText(file: CameraFile): String = if (file.container)
                 Text("正在加载…", style=MaterialTheme.typography.labelMedium)
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
-            state.remote.hasMoreFiles -> {
-                if (state.remote.loadMoreFailed) Text("加载更多失败，请重试。", style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.error)
+            state.remote.loadMoreFailed && state.remote.hasMoreFiles -> {
+                Text("加载更多失败，请重试。", style=MaterialTheme.typography.bodySmall, color=MaterialTheme.colorScheme.error)
                 TextButton(onClick=actions.loadMore,
-                    enabled=!state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore) { Text("加载更多（20 项）") }
+                    enabled=!state.transferring && !state.remote.remoteSwitching && !state.remote.loadingMore) { Text("重试") }
             }
         }
     }
@@ -442,11 +463,13 @@ private fun gallerySecondaryText(file: CameraFile): String = if (file.container)
         if (active != null) {
             if (active.total > 0) LinearProgressIndicator(progress={ (active.received.toFloat()/active.total).coerceIn(0f, 1f) }, modifier=Modifier.fillMaxWidth())
             else LinearProgressIndicator(Modifier.fillMaxWidth())
-            Text("${bytes(active.received)} / ${bytes(active.total)}", style=MaterialTheme.typography.labelSmall)
+            Text(if (active.total > 0) "${if(active.received > 0) bytes(active.received) else "0 B"} / ${bytes(active.total)}"
+                else if (active.received > 0) "已接收 ${bytes(active.received)}" else "正在下载…",
+                style=MaterialTheme.typography.labelSmall)
         }
         if (expanded) {
             Column(Modifier.heightIn(max=180.dp).verticalScroll(rememberScrollState())) { state.queue.takeLast(50).forEach { item -> Text("${item.file.name} · ${item.state}${item.error?.let { "\n$it" } ?: ""}", style=MaterialTheme.typography.bodySmall, modifier=Modifier.padding(vertical=4.dp)) } }
-            if (!state.transferring) TextButton(onClick=actions.clearCompleted) { Text("清空队列记录") }
+            if (!state.transferring) TextButton(onClick=actions.clearCompleted,enabled=!state.oneTouchImport) { Text("清空队列记录") }
         }
     } }
 }
@@ -468,3 +491,4 @@ internal fun bytes(value: Long): String = when {
     value <= 0 -> "未知大小"; value < 1024 -> "$value B"; value < 1024*1024 -> String.format(Locale.ROOT, "%.1f KB", value/1024.0)
     else -> String.format(Locale.ROOT, "%.1f MB", value/(1024.0*1024))
 }
+

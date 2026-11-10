@@ -88,6 +88,9 @@ private fun openAppSettings(context:Context) {
         } },
         onNotificationDenied={ message->scope.launch { snackbar.showSnackbar(message) } },
         askStore=permissionAskStore)
+    val pairing=rememberPairingActions(model,
+        onConnecting={ nav=nav.requestConnection(CameraMode.REMOTE) },
+        onMessage={ message->scope.launch { snackbar.showSnackbar(message) } })
     // Geotagging lives at app scope, so a permission revoked outside Settings is corrected on resume
     // instead of leaving the preference on while the switch reads off.
     var geotagging by rememberSaveable { mutableStateOf(controller.remoteGeotaggingEnabled && controller.locationPermissionGranted()) }
@@ -151,11 +154,16 @@ private fun openAppSettings(context:Context) {
             }}) { padding ->
                 Column(Modifier.fillMaxSize().padding(padding)) {
                     if(state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    if(state.oneTouchImport) OneTouchImportStatus(state,controller::cancelOneTouchImport)
                     when(shown) {
                         Destination.Home,Destination.Capture->Home(state,controller,
                             onOpenWorkspace={ nav=nav.copy(destination=workspaceFor(state.mode,state.remote.galleryActive),entryTarget=null) },
-                            onConnect=connectWithPermissions,permissions=requestPermissions)
-                        Destination.Gallery->CameraGallery(state,controller.galleryActions())
+                            onConnect=connectWithPermissions,permissions=requestPermissions,pairing=pairing)
+                        Destination.Gallery->if(state.oneTouchImport) Column(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                            Text("正在导入相机共享照片",style=MaterialTheme.typography.titleMedium)
+                            QueuePanel(state,controller.galleryActions())
+                            Text("照片保存到 DCIM/AlphaCompanion；完成后自动结束连接。",style=MaterialTheme.typography.bodyMedium)
+                        } else CameraGallery(state,controller.galleryActions())
                         Destination.Local->LocalLibraryScreen(state,controller)
                         Destination.Settings->SettingsPage(state,controller,theme,dynamic,{theme=it;controller.prefs.edit().putString("theme",it).apply()}, {dynamic=it;controller.prefs.edit().putBoolean("dynamic",it).apply()},requestPermissions,geotagging,::enableGeotagging,::disableGeotagging)
                     }
@@ -165,16 +173,36 @@ private fun openAppSettings(context:Context) {
     }
 }
 
-@Composable private fun Home(state:AppState,c:CompanionController,onOpenWorkspace:()->Unit,onConnect:(CameraMode)->Unit,permissions:()->Unit) {
+@Composable internal fun OneTouchImportStatus(state: AppState, onCancel: ()->Unit) {
+    Surface(color=MaterialTheme.colorScheme.surfaceContainer,modifier=Modifier.fillMaxWidth().testTag("one-touch-import")) {
+        Row(Modifier.padding(horizontal=16.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically) {
+            Text(state.message,Modifier.weight(1f),style=MaterialTheme.typography.bodyMedium)
+            TextButton(onClick=onCancel,enabled=state.connected||state.connecting) { Text("取消导入") }
+        }
+    }
+}
+
+@Composable private fun Home(state:AppState,c:CompanionController,onOpenWorkspace:()->Unit,onConnect:(CameraMode)->Unit,permissions:()->Unit,pairing:PairingActions) {
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
         item { Text("相机工作台",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.SemiBold) }
         item { HomeStatusCard(state) }
+        if(state.connecting) item { OutlinedButton(onClick=c::cancelPairing,shape=shape,modifier=Modifier.fillMaxWidth()) { Text("取消连接") } }
+        if(!state.connected) item {
+            Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick=pairing.scan,enabled=!state.busy&&!state.connecting,shape=shape,modifier=Modifier.fillMaxWidth().testTag("pairing-scan")) {
+                    Icon(Icons.Outlined.QrCodeScanner,null); Spacer(Modifier.width(8.dp)); Text("扫描相机二维码")
+                }
+                OutlinedButton(onClick=pairing.nfc,enabled=!state.busy&&!state.connecting,shape=shape,modifier=Modifier.fillMaxWidth().testTag("pairing-nfc")) {
+                    Icon(Icons.Outlined.Nfc,null); Spacer(Modifier.width(8.dp)); Text("NFC 配对")
+                }
+            }
+        }
         if(state.connected) {
             item { Button(onClick=onOpenWorkspace,shape=shape,modifier=Modifier.fillMaxWidth()) {
                 val remoteCapture=state.mode==CameraMode.REMOTE&&!state.remote.galleryActive
                 Icon(if(remoteCapture)Icons.Outlined.CameraAlt else Icons.Outlined.PhotoAlbum,null)
                 Spacer(Modifier.width(8.dp))
-                Text(if(remoteCapture) "进入拍摄" else "打开相机图库")
+                Text(if(state.oneTouchImport) "查看导入进度" else if(remoteCapture) "进入拍摄" else "打开相机图库")
             } }
             item { OutlinedButton(onClick={ state.mode?.let(onConnect) },enabled=!state.connecting&&!state.busy&&!state.transferring,shape=shape,modifier=Modifier.fillMaxWidth()) { Text("重新连接相机") } }
             item { OutlinedButton(onClick=c::endSession,enabled=!state.busy&&!state.transferring,shape=shape,modifier=Modifier.fillMaxWidth()) { Icon(Icons.Outlined.LinkOff,null);Spacer(Modifier.width(8.dp));Text("断开相机") } }
@@ -212,7 +240,7 @@ private fun openAppSettings(context:Context) {
                 Text(device.displayName+device.identity.firmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.labelLarge)
                 if(device.identity.lens.isNotBlank()) Text(device.identity.lens,style=MaterialTheme.typography.bodySmall)
             }
-            if(!state.connected) Text("先在相机选择工作模式，再连接对应的 Wi-Fi。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+            if(!state.connected) Text("可扫描智能遥控二维码或触碰 NFC；也可在系统连接 Wi-Fi 后选择下方模式。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -240,7 +268,7 @@ private fun openAppSettings(context:Context) {
             item { Text(device.displayName+device.identity.firmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.bodySmall) }
             if(device.identity.lens.isNotBlank()) item { Text("镜头：${device.identity.lens}"+device.identity.lensFirmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.bodySmall) }
         }
-        item { Text("请先在系统设置中连接相机 Wi-Fi，再回到应用连接。",style=MaterialTheme.typography.bodySmall) }
+        item { Text("遥控拍摄可扫码或触碰 NFC；一触分享可在相机选图后触碰 NFC。手动连接需先在系统设置中连好 Wi-Fi，下方地址通常留空。",style=MaterialTheme.typography.bodySmall) }
         item { OutlinedTextField(description,{description=it;saved=false},Modifier.fillMaxWidth(),label={Text("描述文件 URL / JPEG 模式相机 IP")},placeholder={Text("留空自动查找")},singleLine=true) }
         item { Text("RAW / 原文件传输（实验性）",style=MaterialTheme.typography.titleSmall) }
         item { Text("使用已登记的接收端 GUID；也可通过下方 USB 工具登记。",style=MaterialTheme.typography.bodySmall) }
@@ -257,7 +285,7 @@ private fun openAppSettings(context:Context) {
         item { RemoteGeotaggingSetting(geotagging,onEnableRequest=onEnableGeotagging,onDisable=onDisableGeotagging) }
         item { HorizontalDivider() }
         item { Text("存储与诊断",style=MaterialTheme.typography.titleMedium) }
-        item { Text("照片保存在 DCIM/AlphaCompanion。\n预览不会自动保存，点击下载才保存到系统图库。\n相机图库中未完成的下载可在重连后继续，重试会从头下载。\n本地图库可删除文件，或仅清除导入记录。",style=MaterialTheme.typography.bodySmall) }
+        item { Text("照片保存在 DCIM/AlphaCompanion。\nNFC 一触分享会自动导入相机共享的 JPEG（最大可用尺寸），结束后断开连接。\n其他预览不会自动保存，点击下载才保存到系统图库。\n相机图库中未完成的下载可在重连后继续，重试会从头下载。\n本地图库可删除文件，或仅清除导入记录。",style=MaterialTheme.typography.bodySmall) }
         item { Box {
             OutlinedButton(onClick={logMenu=true},shape=shape){Text("记录级别：${logLevel.name}")}
             DropdownMenu(logMenu,{logMenu=false}) { LogLevel.entries.forEach { level ->
@@ -268,9 +296,10 @@ private fun openAppSettings(context:Context) {
         item { OutlinedButton(onClick={export.launch(DiagnosticFiles.name(state.mode))},shape=shape){Icon(Icons.Outlined.BugReport,null);Spacer(Modifier.width(8.dp));Text("导出日志与诊断")} }
         item { HorizontalDivider() }
         item { Text("关于与许可",style=MaterialTheme.typography.titleMedium) }
-        item { Text("版本 ${BuildConfig.VERSION_NAME}\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Text("版本 ${BuildConfig.VERSION_NAME}\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n二维码扫描：ZXing Android Embedded / ZXing · Apache-2.0。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
     }
     if(registerUsb) AlertDialog(onDismissRequest={registerUsb=false},title={Text("登记相机的接收端？")},text={
         Text("$usbInfo\n\n这会替换相机“发送到电脑”的接收端设置。"+(if(guid.isBlank()) "将生成并保存本应用专用 GUID。" else "将登记输入框中的 GUID。")+"如需保留电脑接收端，请先保存其 GUID。")
     },confirmButton={TextButton(onClick={registerUsb=false;c.registerUsbGuid(guid) { guid=it }}){Text("登记")}},dismissButton={TextButton(onClick={registerUsb=false}){Text("取消")}})
 }
+

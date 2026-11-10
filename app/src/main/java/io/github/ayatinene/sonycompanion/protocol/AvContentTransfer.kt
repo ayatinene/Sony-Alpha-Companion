@@ -53,7 +53,9 @@ data class AvContentItem(
     val original: List<AvContentOriginal>,
     val previewUrl: String?,
     val thumbnailUrl: String? = null,
-    val folderNo: String = ""
+    val folderNo: String = "",
+    /** True for a browsable date-view folder, which has no downloadable original. */
+    val isDateFolder: Boolean = false
 ) {
     val jpegOriginals: List<AvContentOriginal> get() = original.filter { it.format == AV_CONTENT_FORMAT_JPEG }
     val rawOriginals: List<AvContentOriginal> get() = original.filter { it.format == AV_CONTENT_FORMAT_RAW }
@@ -189,10 +191,10 @@ class AvContentTransfer(
      * Returns the declared content count from `result[0] {"count": n}`, or -1 when the camera does
      * not advertise getContentCount. Error 7 and malformed results are not swallowed.
      */
-    suspend fun count(source: String): Int {
+    suspend fun count(source: String, view: String = VIEW_FLAT): Int {
         ensureNegotiated()
         if (!countAvailable) return -1
-        val result = call("getContentCount", countParams(source), countVersion)
+        val result = call("getContentCount", countParams(source, view), countVersion)
         if (result.length() == 0) throw AvContentProtocolError("avContent getContentCount 返回空 result")
         val first = result.opt(0)
         return when (first) {
@@ -215,12 +217,13 @@ class AvContentTransfer(
         source: String,
         startIndex: Int,
         pageSize: Int = DEFAULT_PAGE_SIZE,
-        sort: String = SORT_DESCENDING
+        sort: String = SORT_DESCENDING,
+        view: String = VIEW_FLAT
     ): AvContentPage {
         require(startIndex >= 0) { "起始位置不能为负" }
         require(pageSize > 0) { "分页大小必须为正" }
         ensureNegotiated()
-        val result = call("getContentList", listParams(source, startIndex, pageSize, sort), listVersion)
+        val result = call("getContentList", listParams(source, startIndex, pageSize, sort, view), listVersion)
         val array = result.optJSONArray(0)
             ?: throw AvContentProtocolError("avContent getContentList 返回的 result[0] 不是数组")
         val items = ArrayList<AvContentItem>(array.length())
@@ -271,11 +274,11 @@ class AvContentTransfer(
 
     // --- RPC -----------------------------------------------------------------------------------
 
-    private fun countParams(source: String) = JSONArray().put(JSONObject().put("uri", source).put("view", VIEW_FLAT))
+    private fun countParams(source: String, view: String) = JSONArray().put(JSONObject().put("uri", source).put("view", view))
 
-    private fun listParams(source: String, startIndex: Int, pageSize: Int, sort: String) = JSONArray().put(
+    private fun listParams(source: String, startIndex: Int, pageSize: Int, sort: String, view: String) = JSONArray().put(
         JSONObject().put("uri", source).put("stIdx", startIndex).put("cnt", pageSize)
-            .put("view", VIEW_FLAT).put("sort", sort)
+            .put("view", view).put("sort", sort)
     )
 
     private suspend fun call(method: String, params: JSONArray = JSONArray(), version: String = "1.0"): JSONArray =
@@ -309,6 +312,7 @@ class AvContentTransfer(
         const val DEFAULT_PAGE_SIZE = 20
         const val SORT_DESCENDING = "descending"
         const val VIEW_FLAT = "flat"
+        const val VIEW_DATE = "date"
 
         /** Sony error code for "NotAvailableNow"; surfaced to the caller, never treated as empty. */
         const val ERROR_NOT_AVAILABLE_NOW = 7
@@ -364,8 +368,19 @@ internal fun strictContentUrl(raw: String?): String? {
 internal fun parseAvContentItem(raw: Any?, source: String): AvContentItem? {
     val obj = raw as? JSONObject ?: return null
     val kind = obj.stringOrNull("contentKind")?.lowercase().orEmpty()
-    if (kind.isNotEmpty() && kind != "still") return null
     val contentId = obj.stringOrNull("uri") ?: return null
+    // In date view Sony exposes dates as browsable content, not as image resources.
+    // Only accept a date URI actually returned under the current storage source.
+    val dateUri = source.startsWith("storage:") && !source.contains("?path=") &&
+        contentId.startsWith("$source?path=")
+    val browsable = obj.optString("isBrowsable").equals("true", ignoreCase = true)
+    if (dateUri && (browsable || kind in setOf("directory", "folder", "date"))) {
+        val title = obj.stringOrNull("title")
+            ?: contentId.substringAfter("?path=").substringBefore('&')
+        if (title.isBlank()) return null
+        return AvContentItem(source, contentId, title, "", emptyList(), null, isDateFolder = true)
+    }
+    if (kind.isNotEmpty() && kind != "still") return null
     val date = obj.stringOrNull("createdTime").orEmpty()
     val inner = obj.optJSONObject("content") ?: obj
     val original = parseAvOriginals(inner.optJSONArray("original") ?: obj.optJSONArray("original"))
