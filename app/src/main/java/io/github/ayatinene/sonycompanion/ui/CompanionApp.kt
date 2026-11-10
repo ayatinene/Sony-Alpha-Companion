@@ -1,9 +1,6 @@
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 package io.github.ayatinene.sonycompanion.ui
 
-import android.content.Intent
-import android.net.Uri
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
@@ -15,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
@@ -22,6 +20,7 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
@@ -32,61 +31,112 @@ import kotlinx.coroutines.*
 import java.util.Locale
 
 private val shape=RoundedCornerShape(10.dp)
-private data class Destination(val title:String,val icon:ImageVector)
-private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destination("相机",Icons.Outlined.CameraAlt),Destination("本地",Icons.Outlined.PhotoLibrary),Destination("设置",Icons.Outlined.Settings))
+private val ShellNavSaver=listSaver<ShellNav,Any>(
+    save={ listOf(it.destination.name,it.phase.name,it.entryTarget?.name.orEmpty()) },
+    restore={ ShellNav(Destination.valueOf(it[0] as String),ConnectionPhase.valueOf(it[1] as String),(it[2] as String).takeIf(String::isNotEmpty)?.let { name -> Destination.valueOf(name) }) })
+private fun Destination.icon():ImageVector=when(this) {
+    Destination.Home->Icons.Outlined.Home
+    Destination.Capture->Icons.Outlined.CameraAlt
+    Destination.Gallery->Icons.Outlined.PhotoAlbum
+    Destination.Local->Icons.Outlined.PhotoLibrary
+    Destination.Settings->Icons.Outlined.Settings
+}
+private fun connectionSubtitle(state:AppState):String=when {
+    state.connecting->"正在连接…"
+    state.connected->state.device?.displayName ?: "已连接"
+    else->"未连接"
+}
 
 @Composable fun CompanionApp(model:CompanionViewModel,openWifi:()->Unit,requestPermissions:()->Unit) {
     val controller=model.controller
     val state by controller.state.collectAsStateWithLifecycle()
     val context=LocalContext.current
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    var nav by rememberSaveable(stateSaver=ShellNavSaver) { mutableStateOf(ShellNav()) }
     var theme by remember { mutableStateOf(controller.prefs.getString("theme","system")!!) }
     var dynamic by remember { mutableStateOf(controller.prefs.getBoolean("dynamic",false)) }
-    val shooting=tab==1 && state.mode==CameraMode.REMOTE && (state.connected || state.busy)
-    BackHandler(enabled=shooting) { tab=0 }
+    val captureReady=state.connected && state.mode==CameraMode.REMOTE
+    val immersive=nav.destination==Destination.Capture && captureReady
+    val shown=when {
+        nav.destination==Destination.Capture && !captureReady->Destination.Home
+        nav.destination==Destination.Gallery && !state.connected->Destination.Home
+        else->nav.destination
+    }
     val dark=when(theme) { "dark"->true;"light"->false;else->isSystemInDarkTheme() }
-    val colors=if(shooting) darkColorScheme(primary=Color(0xFFF4AE78),surface=Color(0xFF14171B),background=Color(0xFF080B0E))
+    val colors=if(immersive) darkColorScheme(primary=Color(0xFFF4AE78),surface=Color(0xFF14171B),background=Color(0xFF080B0E))
         else if(dynamic && android.os.Build.VERSION.SDK_INT>=31) { if(dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context) }
         else if(dark) darkColorScheme(primary=Color(0xFFF4AE78),secondary=Color(0xFF9CC9C5),surface=Color(0xFF111820),background=Color(0xFF111820))
         else lightColorScheme(primary=Color(0xFF914C1D),secondary=Color(0xFF356964),surface=Color(0xFFF8F9FC),background=Color(0xFFF8F9FC))
     val snackbar=remember { SnackbarHostState() }
     LaunchedEffect(state.error) { state.error?.let { snackbar.showSnackbar(it,duration=SnackbarDuration.Long); controller.clearError() } }
+    LaunchedEffect(state.connected,state.connecting,state.mode) { nav=nav.observe(state.connected,state.connecting,state.mode) }
     MaterialTheme(colorScheme=colors,shapes=Shapes(small=shape,medium=shape,large=RoundedCornerShape(16.dp))) {
-        Scaffold(contentWindowInsets=WindowInsets.safeDrawing,snackbarHost={SnackbarHost(snackbar)},topBar={
-            if(!shooting) TopAppBar(title={ Column {
-                Text("Alpha Companion",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold)
-                Text(state.device?.displayName ?: "Sony α7R II · 4.01",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
-            } },actions={
-                if(state.connected) IconButton(onClick=controller::endSession,enabled=!state.transferring) { Icon(Icons.Outlined.LinkOff,"结束连接") }
-                IconButton(onClick=openWifi) { Icon(Icons.Outlined.Wifi,"Wi-Fi 设置") }
-            })
-        },bottomBar={if(!shooting)NavigationBar {
-            destinations.forEachIndexed { index,d -> NavigationBarItem(selected=tab==index,onClick={tab=index},icon={Icon(d.icon,d.title)},label={Text(d.title)},alwaysShowLabel=true) }
-        }}) { padding ->
-            Column(Modifier.fillMaxSize().padding(padding)) {
-                if(state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                when(tab) {
-                    0->Home(state,controller,{mode->controller.connect(mode); tab=1},requestPermissions)
-                    1->when {
-                        state.mode==CameraMode.REMOTE && (state.connected || state.busy)->RemoteScreen(state,controller,onBack={tab=0},openWifi=openWifi)
-                        state.connected || state.busy->CameraGallery(state,controller)
-                        else->Home(state,controller,{mode->controller.connect(mode)},requestPermissions)
+        if(immersive) {
+            RemoteScreen(state,controller,snackbar,onBack={ nav=nav.copy(destination=Destination.Home,entryTarget=null) },openWifi=openWifi)
+        } else {
+            val items=destinationsFor(state.connected,state.mode)
+            Scaffold(contentWindowInsets=WindowInsets.safeDrawing,snackbarHost={SnackbarHost(snackbar)},topBar={
+                TopAppBar(title={ Column {
+                    Text("Alpha Companion",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold)
+                    Text(connectionSubtitle(state),style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                } },actions={
+                    if(state.connected) IconButton(onClick=controller::endSession,enabled=!state.transferring) { Icon(Icons.Outlined.LinkOff,"结束连接") }
+                    IconButton(onClick=openWifi) { Icon(Icons.Outlined.Wifi,"Wi-Fi 设置") }
+                })
+            },bottomBar={NavigationBar {
+                items.forEach { d -> NavigationBarItem(selected=shown==d,onClick={ if(d!=nav.destination) nav=nav.copy(destination=d,entryTarget=null) },
+                    icon={Icon(d.icon(),d.title())},label={Text(d.title())},alwaysShowLabel=true) }
+            }}) { padding ->
+                Column(Modifier.fillMaxSize().padding(padding)) {
+                    if(state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    when(shown) {
+                        Destination.Home,Destination.Capture->Home(state,controller,
+                            onOpenWorkspace={ nav=nav.copy(destination=workspaceFor(state.mode),entryTarget=null) },
+                            onConnect={ mode->if(controller.connect(mode)) nav=nav.requestConnection(mode) },permissions=requestPermissions)
+                        Destination.Gallery->CameraGallery(state,controller)
+                        Destination.Local->LocalLibraryScreen(state,controller)
+                        Destination.Settings->SettingsPage(state,controller,theme,dynamic,{theme=it;controller.prefs.edit().putString("theme",it).apply()}, {dynamic=it;controller.prefs.edit().putBoolean("dynamic",it).apply()},requestPermissions)
                     }
-                    2->LocalLibraryScreen(state,controller)
-                    else->SettingsPage(state,controller,theme,dynamic,{theme=it;controller.prefs.edit().putString("theme",it).apply()}, {dynamic=it;controller.prefs.edit().putBoolean("dynamic",it).apply()},requestPermissions)
                 }
             }
         }
     }
 }
 
-@Composable private fun Home(state:AppState,c:CompanionController,connect:(CameraMode)->Unit,permissions:()->Unit) {
+@Composable private fun Home(state:AppState,c:CompanionController,onOpenWorkspace:()->Unit,onConnect:(CameraMode)->Unit,permissions:()->Unit) {
     LazyColumn(Modifier.fillMaxSize(),contentPadding=PaddingValues(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
         item { Text("相机工作台",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.SemiBold) }
-        item { Surface(color=MaterialTheme.colorScheme.surfaceContainer,shape=shape) { Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+        item { HomeStatusCard(state) }
+        if(state.connected) {
+            item { Button(onClick=onOpenWorkspace,shape=shape,modifier=Modifier.fillMaxWidth()) {
+                Icon(if(state.mode==CameraMode.REMOTE)Icons.Outlined.CameraAlt else Icons.Outlined.PhotoAlbum,null)
+                Spacer(Modifier.width(8.dp))
+                Text(if(state.mode==CameraMode.REMOTE) "进入拍摄" else "打开相机图库")
+            } }
+            item { OutlinedButton(onClick={ state.mode?.let(onConnect) },enabled=!state.connecting&&!state.busy&&!state.transferring,shape=shape,modifier=Modifier.fillMaxWidth()) { Text("重新连接相机") } }
+            item { OutlinedButton(onClick=c::endSession,enabled=!state.busy&&!state.transferring,shape=shape,modifier=Modifier.fillMaxWidth()) { Icon(Icons.Outlined.LinkOff,null);Spacer(Modifier.width(8.dp));Text("断开相机") } }
+        } else {
+            items(CameraMode.entries) { mode ->
+                OutlinedCard(shape=shape,modifier=Modifier.fillMaxWidth().testTag("home-mode-card")) { Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
+                        Icon(when(mode){CameraMode.REMOTE->Icons.Outlined.CameraAlt;CameraMode.JPEG->Icons.Outlined.FileDownload;else->Icons.Outlined.RawOn},null,Modifier.size(26.dp))
+                        Text(mode.title,style=MaterialTheme.typography.titleMedium)
+                    }
+                    Text(mode.instruction,style=MaterialTheme.typography.bodyMedium)
+                    Button(onClick={onConnect(mode)},enabled=!state.connecting&&!state.busy&&!state.transferring,shape=shape) { Text(if(state.connecting) "连接中…" else "连接") }
+                } }
+            }
+        }
+        item { TextButton(onClick=permissions) { Icon(Icons.Outlined.Security,null); Spacer(Modifier.width(8.dp)); Text("附近设备与通知权限") } }
+        if(state.local.isNotEmpty()) item { Text("最近导入：${state.local.first().name}",style=MaterialTheme.typography.bodyMedium) }
+    }
+}
+
+@Composable internal fun HomeStatusCard(state:AppState,modifier:Modifier=Modifier) {
+    Surface(modifier=modifier.fillMaxWidth().testTag("home-status-card"),color=MaterialTheme.colorScheme.surfaceContainer,shape=shape) {
+        Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 Box(Modifier.size(8.dp).background(if(state.connected)Color(0xFF5CA681) else MaterialTheme.colorScheme.outline,CircleShape))
-                Text(if(state.connected) "已连接" else "等待连接",fontWeight=FontWeight.Medium)
+                Text(when { state.connected->"已连接"; state.connecting->"连接中"; else->"等待连接" },fontWeight=FontWeight.Medium)
             }
             Text(state.message,style=MaterialTheme.typography.bodyMedium)
             if(state.queueNotice.isNotBlank()) Text(state.queueNotice,style=MaterialTheme.typography.bodySmall)
@@ -94,39 +144,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
                 Text(device.displayName+device.identity.firmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.labelLarge)
                 if(device.identity.lens.isNotBlank()) Text(device.identity.lens,style=MaterialTheme.typography.bodySmall)
             }
-            Text("先在相机选择工作模式，再连接对应的 Wi-Fi。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-        } } }
-        items(CameraMode.entries) { mode ->
-            OutlinedCard(shape=shape,modifier=Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(12.dp)) {
-                    Icon(when(mode){CameraMode.REMOTE->Icons.Outlined.CameraAlt;CameraMode.JPEG->Icons.Outlined.FileDownload;else->Icons.Outlined.RawOn},null,Modifier.size(26.dp))
-                    Text(mode.title,style=MaterialTheme.typography.titleMedium)
-                }
-                Text(mode.instruction,style=MaterialTheme.typography.bodyMedium)
-                Button(onClick={connect(mode)},enabled=!state.busy&&!state.transferring,shape=shape) { Text(if(state.mode==mode&&state.connected) "重新连接" else "连接") }
-            } }
-        }
-        item { TextButton(onClick=permissions) { Icon(Icons.Outlined.Security,null); Spacer(Modifier.width(8.dp)); Text("附近设备与通知权限") } }
-        item { Text("Sony α7R II · 遥控拍摄与照片导入",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
-        if(state.local.isNotEmpty()) item { Text("最近导入：${state.local.first().name}",style=MaterialTheme.typography.bodyMedium) }
-    }
-}
-
-@Composable internal fun SettingControl(setting:Setting,onSelect:(String)->Unit) {
-    var open by remember { mutableStateOf(false) }
-    Box {
-        OutlinedButton(onClick={open=true},enabled=setting.writable&&setting.choices.isNotEmpty(),shape=shape,modifier=Modifier.fillMaxWidth(),
-            colors=ButtonDefaults.outlinedButtonColors(disabledContentColor=MaterialTheme.colorScheme.onSurface),contentPadding=PaddingValues(horizontal=10.dp,vertical=8.dp)) {
-            Column(Modifier.fillMaxWidth(),horizontalAlignment=Alignment.Start) {
-                Row(verticalAlignment=Alignment.CenterVertically) {
-                    Text(setting.label,Modifier.weight(1f),style=MaterialTheme.typography.labelSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
-                    if(setting.writable&&setting.choices.isNotEmpty()) Icon(Icons.Outlined.ExpandMore,null,Modifier.size(14.dp))
-                }
-                Text(setting.display(setting.current),style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
-            }
-        }
-        DropdownMenu(expanded=open,onDismissRequest={open=false},modifier=Modifier.heightIn(max=350.dp)) {
-            setting.choices.forEach { value->DropdownMenuItem(text={Text(setting.display(value))},onClick={open=false;onSelect(value)}) }
+            if(!state.connected) Text("先在相机选择工作模式，再连接对应的 Wi-Fi。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -148,7 +166,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically) {
             if(state.mode==CameraMode.JPEG) IconButton(onClick=c::root,enabled=!state.busy&&!state.transferring){Icon(Icons.Outlined.FolderOpen,"返回根目录")}
-            Text(state.folder.ifBlank { "存储卡" },Modifier.weight(1f),style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
+            Text("相机图库",Modifier.weight(1f),style=MaterialTheme.typography.titleSmall,maxLines=1,overflow=TextOverflow.Ellipsis)
             IconButton(onClick={descending=!descending}) { Icon(Icons.Outlined.Sort,"切换排序") }
             if(selected.isNotEmpty()) TextButton(onClick={selected=emptySet()}) { Text("取消选择") }
             TextButton(onClick={selected=if(selected.size==files.count{!it.container})emptySet() else files.filter{!it.container}.map{it.id}.toSet()}){Text("全选")}
@@ -199,7 +217,7 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
     preview?.let { key ->
         val pictures=files.filter { !it.container }
         PhotoViewer(pictures.map { file -> ViewerImage(file.id,file.name,
-            if(file.raw && file.handle!=null)"相机缩略预览 · ARW 原文件可单独下载" else "相机 JPEG 预览 · 临时缓存") },key,
+            if(file.raw && file.handle!=null)"相机缩略预览 · ARW 原文件可单独下载" else "相机预览 · 下载后保存") },key,
             refreshKey=state.transferring,onDismiss={preview=null},load={ image -> c.cameraPreview(pictures.first { it.id==image.key },state.queueScope) }) { image ->
             val file=pictures.first { it.id==image.key }
             TextButton(onClick={detail=file}) { Icon(Icons.Outlined.Info,null);Spacer(Modifier.width(4.dp));Text("信息") }
@@ -264,16 +282,14 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
         item { Row(verticalAlignment=Alignment.CenterVertically){Text("Material You 动态配色",Modifier.weight(1f));Switch(dynamic,setDynamic)} }
         item { HorizontalDivider() }
         item { Text("连接",style=MaterialTheme.typography.titleMedium) }
-        if(state.remote.application.isNotBlank()) item { Text("遥控应用接口信息：${state.remote.application}",style=MaterialTheme.typography.bodySmall) }
         state.device?.let { device ->
             item { Text(device.displayName+device.identity.firmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.bodySmall) }
             if(device.identity.lens.isNotBlank()) item { Text("镜头：${device.identity.lens}"+device.identity.lensFirmware.takeIf { it.isNotBlank() }?.let { " · 固件 $it" }.orEmpty(),style=MaterialTheme.typography.bodySmall) }
-            if(device.identity.applications.isNotEmpty()) item { Text("已安装机内应用：\n"+device.identity.applications.joinToString("\n") { "${it.name} ${it.version}".trim() },style=MaterialTheme.typography.bodySmall) }
         }
-        item { Text("手动连接 Wi-Fi 后发现相机。保留移动数据；相机请求固定走 Wi-Fi。",style=MaterialTheme.typography.bodySmall) }
-        item { OutlinedTextField(description,{description=it;saved=false},Modifier.fillMaxWidth(),label={Text("描述文件 URL / JPEG 模式相机 IP")},placeholder={Text("留空使用 SSDP 自动发现")},singleLine=true) }
-        item { Text("RAW / Send to Computer · 实验性",style=MaterialTheme.typography.titleSmall) }
-        item { Text("先通过 USB 登记接收端，再用同一 GUID 连接。可使用下方 OTG 登记工具，或填入已经通过电脑登记的 GUID。",style=MaterialTheme.typography.bodySmall) }
+        item { Text("请先在系统设置中连接相机 Wi-Fi，再回到应用连接。",style=MaterialTheme.typography.bodySmall) }
+        item { OutlinedTextField(description,{description=it;saved=false},Modifier.fillMaxWidth(),label={Text("描述文件 URL / JPEG 模式相机 IP")},placeholder={Text("留空自动查找")},singleLine=true) }
+        item { Text("RAW / 原文件传输（实验性）",style=MaterialTheme.typography.titleSmall) }
+        item { Text("使用已登记的接收端 GUID；也可通过下方 USB 工具登记。",style=MaterialTheme.typography.bodySmall) }
         item { OutlinedTextField(host,{host=it;saved=false},Modifier.fillMaxWidth(),label={Text("相机局域网 IP（留空自动发现）")},singleLine=true) }
         item { OutlinedTextField(guid,{guid=it;saved=false},Modifier.fillMaxWidth(),label={Text("接收端 16 字节 GUID")},supportingText={Text("32 位十六进制，可含冒号")},singleLine=true) }
         item { Button(onClick={c.prefs.edit().putString("description",description.trim()).putString("computerHost",host.trim()).putString("guid",guid.trim()).apply();saved=true},shape=shape){Text(if(saved) "已保存" else "保存连接设置")} }
@@ -282,17 +298,18 @@ private val destinations=listOf(Destination("首页",Icons.Outlined.Home),Destin
         item { TextButton(onClick=permissions){Text("申请附近设备与通知权限")} }
         item { HorizontalDivider() }
         item { Text("存储与诊断",style=MaterialTheme.typography.titleMedium) }
-        item { Text("照片：DCIM/AlphaCompanion\n大图预览使用临时缓存，点击下载才保存到系统图库。\n队列按相机和模式保存，重试从头下载。\n本地图库可删除文件或仅清除记录；外部删除的失效记录会自动清理。",style=MaterialTheme.typography.bodySmall) }
+        item { Text("照片保存在 DCIM/AlphaCompanion。\n预览不会自动保存，点击下载才保存到系统图库。\n相机图库中未完成的下载可在重连后继续，重试会从头下载。\n本地图库可删除文件，或仅清除导入记录。",style=MaterialTheme.typography.bodySmall) }
         item { Box {
             OutlinedButton(onClick={logMenu=true},shape=shape){Text("记录级别：${logLevel.name}")}
             DropdownMenu(logMenu,{logMenu=false}) { LogLevel.entries.forEach { level ->
                 DropdownMenuItem(text={Text(level.name)},onClick={logLevel=level;c.setLogLevel(level);logMenu=false})
             } }
         } }
-        item { Text("DEBUG 用于排查连接和传输；TRACE 额外记录协议文本。日志循环保留约 1.5 MiB，重启后仍可导出。",style=MaterialTheme.typography.bodySmall) }
+        item { Text("遇到问题可导出日志。日志保存在本机，可能包含相机地址和文件名，分享前请留意。TRACE 记录更详细。",style=MaterialTheme.typography.bodySmall) }
         item { OutlinedButton(onClick={export.launch(DiagnosticFiles.name(state.mode))},shape=shape){Icon(Icons.Outlined.BugReport,null);Spacer(Modifier.width(8.dp));Text("导出日志与诊断")} }
-        item { Text("版本 ${BuildConfig.VERSION_NAME} · Android 10 及以上\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。\n适配目标：Sony α7R II · 固件 4.01。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
-        item { Text(state.logs.takeLast(12).joinToString("\n"),style=MaterialTheme.typography.labelSmall) }
+        item { HorizontalDivider() }
+        item { Text("关于与许可",style=MaterialTheme.typography.titleMedium) }
+        item { Text("版本 ${BuildConfig.VERSION_NAME}\n基于 SonyRX10M3Remote、ImagingEdge4Linux、SonyPhotoTransfer / libptp。GPL-3.0；libptp 保留 LGPL-2.1。",style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant) }
     }
     if(registerUsb) AlertDialog(onDismissRequest={registerUsb=false},title={Text("登记相机的接收端？")},text={
         Text("$usbInfo\n\n这会替换相机“发送到电脑”的接收端设置。"+(if(guid.isBlank()) "将生成并保存本应用专用 GUID。" else "将登记输入框中的 GUID。")+"如需保留电脑接收端，请先保存其 GUID。")
